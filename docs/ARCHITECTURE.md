@@ -5,18 +5,17 @@
 The browser microphone flow is the primary local test path.
 
 1. `public/call.html` loads `public/app.js`.
-2. `public/app.js` asks the backend for a Realtime client secret.
-3. `src/browserRealtime.ts` creates an OpenAI Realtime session using `OPENAI_REALTIME_MODEL`.
-4. The browser connects to OpenAI over WebRTC and streams microphone audio.
-5. Realtime tool calls are handled in `public/app.js`.
+2. `public/app.js` requests session config from `/api/realtime/token` (provider + model from the picker).
+3. **OpenAI:** `src/browserRealtime.ts` mints a Realtime client secret for `OPENAI_REALTIME_MODEL`; the browser completes WebRTC to OpenAI.
+4. **Grok / Gemini:** the same handler returns instructions, tools, PCM rates, and a path to `/api/provider-realtime`; `src/providerRealtime.ts` proxies the browser WebSocket to xAI or Gemini Live while keeping API keys on the server.
+5. Realtime tool calls are executed in `public/app.js`.
 6. Backend APIs handle VIN decoding, GEICO RAG search, Firebase save, and observability storage.
-
-The Twilio path still exists through `src/realtimeBridge.ts`, but browser testing is the main development workflow.
 
 ## Main Boundaries
 
-- `src/agentInstructions.ts`: Lizzy's voice-agent prompt and call rules.
-- `src/browserRealtime.ts`: OpenAI Realtime browser token/session creation.
+- `src/prompts/`: Lizzy's voice-agent prompt—shared core in `intakeCore.ts`; provider-specific addenda in `openaiRealtime.ts`, `grokVoice.ts`, `geminiLive.ts`; wired in `buildRealtimeIntake.ts`.
+- `src/browserRealtime.ts`: session bootstrap for OpenAI (client secrets) and for Grok/Gemini (instructions + tools over the provider proxy).
+- `src/providerRealtime.ts`: WebSocket upgrade at `/api/provider-realtime` proxying to xAI or Gemini with server-side keys.
 - `public/app.js`: WebRTC client, tool execution, transcript capture, audio recording, and browser-side eval timing.
 - `src/geicoKnowledge.ts`: cleaned GEICO data loading, semantic embedding index, and retrieval.
 - `src/intake.ts`: intake validation, normalization, summaries, and confirmation rules.
@@ -26,7 +25,7 @@ The Twilio path still exists through `src/realtimeBridge.ts`, but browser testin
 
 ## Voice Model Provider Direction
 
-Today, only OpenAI Realtime is implemented end to end. The config now reserves these variables for A/B testing:
+Three stacks are wired in the demo UI: **OpenAI Realtime** (WebRTC), **Grok Voice** (xAI realtime via proxy), **Gemini Live** (bidirectional Gemini via proxy). Environment variables:
 
 ```text
 VOICE_MODEL_PROVIDER=openai
@@ -39,13 +38,13 @@ GEMINI_VOICE_MODEL=gemini-3.1-flash-live-preview
 
 Chosen defaults:
 
-- GPT Realtime 2 (`gpt-realtime-2`) for OpenAI because this is the current implemented realtime voice path and the target model for Lizzy.
-- `grok-voice-think-fast-1.0` for Grok because it is the higher-capability xAI voice-agent model.
-- `gemini-3.1-flash-live-preview` for Gemini because it is the low-latency Gemini Live voice model.
+- GPT Realtime 2 (`gpt-realtime-2`) for OpenAI as the primary tested Lizzy realtime stack.
+- `grok-voice-think-fast-1.0` for Grok (xAI voice realtime).
+- `gemini-3.1-flash-live-preview` for Gemini Live low-latency voice.
 
-The clean next step is to add a provider adapter boundary instead of branching model logic throughout the app.
+The clean next step is to consolidate provider branching behind a narrower adapter boundary in the browser layer.
 
-Recommended shape:
+Suggested shape:
 
 ```text
 src/voiceProviders/

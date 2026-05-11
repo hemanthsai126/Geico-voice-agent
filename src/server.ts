@@ -53,6 +53,9 @@ app.get("/conversations", (_req, res) => {
 app.get(["/evals", "/evals/openai", "/evals/grok", "/evals/gemini"], (_req, res) => {
   res.sendFile(join(process.cwd(), "public", "evals.html"));
 });
+app.get(["/rag-analysis", "/rag-analysis/openai", "/rag-analysis/grok", "/rag-analysis/gemini"], (_req, res) => {
+  res.sendFile(join(process.cwd(), "public", "rag-analysis.html"));
+});
 app.get("/evals/conversation", (_req, res) => {
   res.sendFile(join(process.cwd(), "public", "eval-conversation.html"));
 });

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RAG retrieval analysis</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a class="brand" href="/">
+        <span class="brand-mark">K</span>
+        <span>KINRO</span>
+      </a>
+      <div class="nav-links">
+        <a href="/">New call</a>
+        <a href="/conversations">Conversations</a>
+        <a href="/rag-analysis">RAG analysis</a>
+        <a href="/evals">Evals</a>
+        <a href="/rag-analysis/openai">OpenAI · RAG</a>
+        <a href="/rag-analysis/grok">Grok · RAG</a>
+        <a href="/rag-analysis/gemini">Gemini · RAG</a>
+      </div>
+    </nav>
+
+    <main>
+      <section class="card hero-card">
+        <p class="badge" id="ragProviderBadge">RAG retrieval</p>
+        <h1 id="ragPageTitle">RAG Retrieval Analysis</h1>
+        <p class="lede" id="ragPageDescription">
+          How often each GEICO knowledge page shows up when the semantic search tool returns snippets—from saved conversations only.
+        </p>
+        <div class="actions">
+          <a class="button-link primary" href="/">New call</a>
+          <a class="button-link" href="/conversations">Conversations</a>
+          <a class="button-link" href="/rag-analysis">All providers</a>
+          <a class="button-link" href="/rag-analysis/openai">OpenAI</a>
+          <a class="button-link" href="/rag-analysis/grok">Grok</a>
+          <a class="button-link" href="/rag-analysis/gemini">Gemini</a>
+          <a class="button-link" href="/evals">Eval dashboards</a>
+          <button type="button" id="refreshRagAnalysisButton">Refresh</button>
+        </div>
+      </section>
+
+      <section id="ragSummary" class="stack rag-analysis-shell"></section>
+      <section id="ragCharts" class="rag-analysis-main"></section>
+    </main>
+
+    <script type="module" src="/rag-analysis.js"></script>
+  </body>
+</html>

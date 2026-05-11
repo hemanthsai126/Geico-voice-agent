@@ -89,7 +89,6 @@ export function buildConversationEval(conversation) {
     correctedFields: evals.fieldsCorrected ?? [],
     correctionRate: collectedFieldCalls.length ? corrections.length / collectedFieldCalls.length : 0,
     reAskCount: Number(evals.reAskCount ?? 0),
-    toolOverwriteCount: Number(evals.toolOverwriteCount ?? 0),
     interruptionCount: Number(evals.interruptionCount ?? 0),
     silentFailureCount: Number(evals.silentFailureCount ?? toolFailures.length),
     ragCallCount: ragCalls.length,
@@ -107,6 +106,226 @@ export function buildConversationEval(conversation) {
     toolCallCount: toolCalls.length,
     toolUsageByName: countBy(toolCalls.map((call) => call.name ?? "unknown")),
   };
+}
+
+/**
+ * Normalize a stable grouping key for a RAG chunk (prefers canonical URL pathname).
+ */
+export function ragDocumentGroupKey(result) {
+  const url = typeof result.sourceUrl === "string" ? result.sourceUrl.trim() : "";
+  if (url) {
+    try {
+      const pathname = new URL(url).pathname.replace(/\/+$/, "") || "/";
+      return pathname.toLowerCase();
+    } catch {
+      return url.toLowerCase();
+    }
+  }
+  const title = typeof result.title === "string" ? result.title.trim() : "";
+  return title ? title.toLowerCase() : "(unknown)";
+}
+
+export function shortenRagDocLabel(groupKey, maxLen = 64) {
+  const s = String(groupKey ?? "");
+  if (!s.length) return "(unknown)";
+  return s.length <= maxLen ? s : `${s.slice(0, maxLen - 1)}…`;
+}
+
+function sampleVarianceScores(scores) {
+  const n = scores.length;
+  if (n < 2) return 0;
+  const mean = scores.reduce((total, score) => total + score, 0) / n;
+  const sumSq = scores.reduce((total, score) => total + (score - mean) ** 2, 0);
+  return sumSq / (n - 1);
+}
+
+function populationVariance(values) {
+  const n = values.length;
+  if (n === 0) return 0;
+  const mean = values.reduce((total, score) => total + score, 0) / n;
+  const sumSq = values.reduce((total, score) => total + (score - mean) ** 2, 0);
+  return sumSq / n;
+}
+
+/**
+ * Histogram over numeric samples with `[lo, hi)` bins (final bin closed on right).
+ */
+export function buildHistogramBins(values, binCount = 18) {
+  const scores = values.filter((v) => Number.isFinite(v));
+  scores.sort((a, b) => a - b);
+  if (!scores.length) return { bins: [], min: 0, max: 0 };
+  let min = scores[0];
+  let max = scores[scores.length - 1];
+  if (min === max) {
+    max = min + 1e-6;
+  }
+  const bins = [];
+  const width = (max - min) / binCount || 1e-6;
+  for (let i = 0; i < binCount; i += 1) {
+    const lo = min + i * width;
+    const hi = i === binCount - 1 ? max + 1e-9 : min + (i + 1) * width;
+    bins.push({ lo, hi, count: 0 });
+  }
+  for (const s of scores) {
+    let idx = Math.floor((s - min) / width);
+    if (idx < 0) idx = 0;
+    if (idx >= binCount) idx = binCount - 1;
+    bins[idx].count += 1;
+  }
+  return { bins, min, max };
+}
+
+/** Stats from saved `search_auto_insurance_knowledge` payloads across conversations. */
+export function analyzeRagFromConversationEvals(conversationEvals) {
+  const perCall = [];
+  const docHits = new Map();
+  const docTopHits = new Map();
+  const docScoreSum = new Map();
+
+  /** @type {number[]} */
+  let allScores = [];
+
+  /** @type {number[]} */
+  const perCallRanges = [];
+  /** @type {number[]} */
+  const perCallStds = [];
+  /** @type {number[]} */
+  const perCallCoeffVar = [];
+
+  let failedCalls = 0;
+  let totalInvocationCount = 0;
+
+  function bump(key, hitsMap, topsMap, sumsMap, hitsDelta, topsDelta, scoreSumDelta) {
+    hitsMap.set(key, (hitsMap.get(key) ?? 0) + hitsDelta);
+    if (topsDelta) topsMap.set(key, (topsMap.get(key) ?? 0) + topsDelta);
+    sumsMap.set(key, (sumsMap.get(key) ?? 0) + scoreSumDelta);
+  }
+
+  for (const conv of conversationEvals) {
+    for (const call of conv.ragCalls ?? []) {
+      totalInvocationCount += 1;
+      const rawResults = Array.isArray(call.output?.results) ? call.output.results : [];
+      if (call.output?.ok !== true) {
+        failedCalls += 1;
+        continue;
+      }
+
+      /** @type {number[]} */
+      const scores = rawResults.map((r) => Number(r.score)).filter((s) => Number.isFinite(s) && s > 0);
+      const query = typeof call.args?.query === "string" ? call.args.query.trim() : "";
+
+      rawResults.forEach((result, idx) => {
+        const gk = ragDocumentGroupKey(result);
+        const sc = Number(result.score);
+        const valid = Number.isFinite(sc) && sc > 0;
+        bump(gk, docHits, docTopHits, docScoreSum, 1, idx === 0 && valid ? 1 : 0, valid ? sc : 0);
+      });
+
+      allScores = allScores.concat(scores);
+
+      if (scores.length === 0) {
+        continue;
+      }
+
+      const sorted = [...scores].sort((a, b) => a - b);
+      const minS = sorted[0];
+      const maxS = sorted[sorted.length - 1];
+      const range = maxS - minS;
+      const meanScore = scores.reduce((total, score) => total + score, 0) / scores.length;
+      const varSample = scores.length >= 2 ? sampleVarianceScores(scores) : 0;
+      const std = Math.sqrt(varSample);
+      perCallRanges.push(range);
+      perCallStds.push(std);
+      if (Number.isFinite(meanScore) && meanScore > 0) {
+        perCallCoeffVar.push(std / meanScore);
+      }
+
+      const topDoc = rawResults[0];
+      const topLabel = topDoc ? shortenRagDocLabel(ragDocumentGroupKey(topDoc), 96) : "—";
+
+      perCall.push({
+        conversationId: conv.id,
+        listOrdinal: conv.listOrdinal,
+        customerName: conv.customerName ?? "Unknown",
+        startedAt: conv.startedAt,
+        voiceModel: conv.voiceModel,
+        query,
+        ragLatencyMs: Number(call.output?.ragLatencyMs ?? call.durationMs ?? 0),
+        resultCount: scores.length,
+        minScore: minS,
+        maxScore: maxS,
+        rangeScore: range,
+        meanScore,
+        varianceScore: varSample,
+        stdScore: std,
+        coefficientOfVariation: meanScore > 0 ? std / meanScore : undefined,
+        topSourceLabel: topLabel,
+      });
+    }
+  }
+
+  const totalHits = [...docHits.values()].reduce((a, n) => a + n, 0);
+  const totalTop = [...docTopHits.values()].reduce((a, n) => a + n, 0);
+
+  const docStats = [...docHits.entries()].map(([groupKey, hits]) => {
+    const tops = docTopHits.get(groupKey) ?? 0;
+    const sumScore = docScoreSum.get(groupKey) ?? 0;
+    const avgScore = hits > 0 ? sumScore / hits : 0;
+    return {
+      groupKey,
+      displayLabel: shortenRagDocLabel(groupKey, 72),
+      hits,
+      topHits: tops,
+      shareOfHits: totalHits ? hits / totalHits : 0,
+      shareOfTopHits: totalTop ? tops / totalTop : 0,
+      avgScore,
+    };
+  });
+
+  docStats.sort((a, b) => b.hits - a.hits);
+
+  const histogram = buildHistogramBins(allScores, 18);
+
+  const globalMean = allScores.length ? allScores.reduce((a, s) => a + s, 0) / allScores.length : 0;
+  const globalVariance = populationVariance(allScores);
+
+  const avgRange = perCallRanges.length ? perCallRanges.reduce((a, s) => a + s, 0) / perCallRanges.length : 0;
+  const avgStd = perCallStds.length ? perCallStds.reduce((a, s) => a + s, 0) / perCallStds.length : 0;
+  const avgCv = perCallCoeffVar.length ? perCallCoeffVar.reduce((a, s) => a + s, 0) / perCallCoeffVar.length : 0;
+  const flatQueryThreshold = 0.02;
+  const flatQueriesPct = perCallRanges.length
+    ? perCallRanges.filter((r) => r < flatQueryThreshold).length / perCallRanges.length
+    : 0;
+
+  perCall.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
+
+  return {
+    totalRagInvocations: totalInvocationCount,
+    successfulCallRows: perCall.length,
+    failedRagCalls: failedCalls,
+    totalResultPositions: totalHits,
+    perCallSummaries: perCall,
+    documentStats: docStats,
+    histogram,
+    globalMeanScore: globalMean,
+    globalStdScore: Math.sqrt(globalVariance),
+    aggregates: {
+      avgScoreRangeWithinQuery: avgRange,
+      avgWithinQueryStd: avgStd,
+      avgCoefficientOfVariation: avgCv,
+      fractionQueriesVeryFlatRange: flatQueriesPct,
+      flatRangeThreshold: flatQueryThreshold,
+    },
+    concentration: concentrationFromShares(docStats.map((d) => d.shareOfHits)),
+  };
+}
+
+function concentrationFromShares(shares) {
+  const clean = shares.filter((s) => Number.isFinite(s) && s > 0);
+  if (!clean.length) return { hHI: undefined, effectiveDocs: undefined };
+  const h = clean.reduce((sum, p) => sum + p ** 2, 0);
+  const effectiveDocs = h > 0 ? 1 / h : undefined;
+  return { hHI: h, effectiveDocs };
 }
 
 export function buildAggregate(evals) {

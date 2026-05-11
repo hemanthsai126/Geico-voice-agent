@@ -4,7 +4,7 @@
 
 This project is a realtime mock GEICO vehicle-insurance quote agent. Lizzy from GEICO speaks with a customer through the browser microphone, collects required personal and vehicle information, answers GEICO auto-insurance questions with semantic RAG over the cleaned `Geico Data` pages, generates a mock quote, confirms the captured details, and saves the confirmed record to Firebase Firestore. Lizzy always opens in English, can continue in the customer's language if they respond in another language, and stores all fields/results in English.
 
-The project also still includes a Twilio phone-call path, but the easiest local test flow is the browser microphone page at:
+Local testing uses the browser microphone pages:
 
 ```text
 http://localhost:3000/inbound
@@ -89,16 +89,14 @@ The browser microphone flow works like this:
 
 ### Backend
 
-- `src/server.ts` starts the Express server, serves the browser UI, exposes API routes, and keeps the Twilio WebSocket route.
+- `src/server.ts` starts the Express server, serves the browser UI, and exposes API routes.
 - `src/observability.ts` stores local conversation metadata, transcript events, tool calls, and audio files.
 - `src/browserRealtime.ts` creates OpenAI Realtime browser tokens, saves browser intake records, exposes VIN decoding, and exposes GEICO semantic RAG search.
 - `src/geicoKnowledge.ts` chunks cleaned GEICO auto-insurance data from `Geico Data/pages`, builds a local OpenAI embedding cache, and retrieves semantically relevant snippets.
 - `src/intake.ts` defines the intake fields, validation, normalization, confirmation state, and summary formatting.
 - `src/firebase.ts` initializes Firebase Admin and writes confirmed records to Firestore.
 - `src/vinDecoder.ts` decodes VINs through the NHTSA VPIC API and returns only year, make, model, and trim.
-- `src/agentInstructions.ts` contains the Realtime agent prompt.
-- `src/realtimeBridge.ts` handles the Twilio Media Streams to OpenAI Realtime bridge.
-- `src/twilio.ts` returns TwiML for Twilio phone calls.
+- `src/prompts/`: Lizzy’s shared intake prompt (`intakeCore.ts`) plus provider stack addenda (`openaiRealtime.ts`, `grokVoice.ts`, `geminiLive.ts`; composed in `buildRealtimeIntake.ts`).
 
 ### Browser UI
 
@@ -150,8 +148,6 @@ For Firebase Admin local credentials, also set:
 FIREBASE_CLIENT_EMAIL=your_firebase_service_account_email
 FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 ```
-
-`PUBLIC_BASE_URL` is only needed for Twilio phone-call testing. Browser microphone testing can run on localhost.
 
 ## How To Run Locally
 
@@ -236,13 +232,13 @@ A confirmed record includes:
     coverageSummary: string;
   };
   status: "confirmed";
-  twilioCallSid: string;
+  voiceSessionId: string;
   createdAt: FirebaseFirestore.FieldValue;
   updatedAt: FirebaseFirestore.FieldValue;
 }
 ```
 
-For browser microphone tests, `twilioCallSid` is generated with a `browser-` prefix.
+For browser sessions, `voiceSessionId` uses a `browser-` prefixed id.
 
 Payment details are intentionally not part of this saved record.
 
@@ -281,7 +277,18 @@ http://localhost:3000/evals/grok
 http://localhost:3000/evals/gemini
 ```
 
-The provider-specific pages use the saved conversation `voiceModel.provider` field, so OpenAI, Grok, and Gemini conversations can be compared without mixing models.
+A dedicated retrieval analytics dashboard is available for aggregate RAG tooling:
+
+```text
+http://localhost:3000/rag-analysis
+http://localhost:3000/rag-analysis/openai
+http://localhost:3000/rag-analysis/grok
+http://localhost:3000/rag-analysis/gemini
+```
+
+It lists how often each GEICO page pathname contributes snippets (bar chart plus a handful of rollup metrics).
+
+The provider-specific eval and `/rag-analysis/...` URLs use the saved conversation `voiceModel.provider` field, so OpenAI, Grok, and Gemini recordings can be compared without mixing stacks.
 
 The eval area has an overall metrics page, provider-specific pages, and a per-conversation drilldown page. These read the saved `conversation.json` files and display:
 
@@ -291,10 +298,10 @@ The eval area has an overall metrics page, provider-specific pages, and a per-co
 - RAG latency and score quality
 - Firebase save duration
 - total call duration and time to save
-- correction, overwrite, re-ask, interruption, and silent-failure counts
+- correction, re-ask, interruption, and silent-failure counts
 - RAG duplicate result count, source diversity, low-confidence count, and citation traceability
 
-Some metrics are best-effort browser-side measurements. For example, interruption detection is based on whether user transcription completes while agent audio is active, and correction detection is based on a tool overwriting an already captured field with a different value.
+Some metrics are best-effort browser-side measurements. For example, interruption detection is based on whether user transcription completes while agent audio is active, and corrections are counted when `update_collected_field` replaces an already captured non-empty field with a different value.
 
 Payment safety behavior:
 
@@ -406,24 +413,6 @@ The app intentionally stores only:
 - Trim
 
 Other decoded vehicle data is ignored.
-
-## Twilio Phone Call Path
-
-The Twilio path is optional for now. To test phone calls later:
-
-1. Run the backend locally.
-2. Expose it with ngrok.
-3. Set the Twilio phone number voice webhook to:
-
-```text
-POST https://your-ngrok-domain/twilio/voice
-```
-
-Twilio then opens a bidirectional WebSocket stream to:
-
-```text
-wss://your-ngrok-domain/twilio/media-stream
-```
 
 ## Validation Rules
 

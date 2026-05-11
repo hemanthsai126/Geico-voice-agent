@@ -32,7 +32,7 @@ describe("firebase record construction", () => {
 
     assert.equal(record.firstName, "Ada");
     assert.equal(record.status, "confirmed");
-    assert.equal(record.twilioCallSid, "CA123");
+    assert.equal(record.voiceSessionId, "CA123");
     assert.ok(record.createdAt);
     assert.ok(record.updatedAt);
   });

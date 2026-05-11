@@ -48,9 +48,12 @@ let providerOutputCursor = 0;
 let providerPendingInputRate = 24000;
 let providerBargeInActive = false;
 const providerOutputSources = new Set();
+/** Grok/Gemini: mix agent audio into recording using the same playback graph (avoids cross-`AudioContext` timing bugs). */
+let providerAgentCaptureDestination;
+let providerAgentCaptureIntoMix;
 let currentVoiceProvider = "openai";
 let draft = {};
-let readyForConfirmation = false;
+
 let conversation;
 let audioContext;
 let mixedAudioDestination;
@@ -67,6 +70,11 @@ const oneTimeLogs = new Set();
 let pendingUserTurn;
 let agentAudioActive = false;
 let agentResponseStartedAtMs;
+/** OpenAI RTC: truncate assistant transcripts to audio the user heard (see speech_started handler). */
+let recentAssistantAudioItemId;
+/** Grok/Gemini PCM playback: `{ startAt,endAt }` in providerOutputContext time (seconds) for proportional transcript trim on barge-in. */
+let agentTurnPlaybackSlices = [];
+const suppressedAgentTranscriptCommitKeys = new Set();
 
 configurePage();
 loadVoiceModelOptions();
@@ -182,6 +190,7 @@ async function startProviderSession(tokenData, selectedVoiceModel) {
   providerOutputContext = new AudioContext({ sampleRate: outputRate });
   await providerOutputContext.resume();
   providerOutputCursor = providerOutputContext.currentTime;
+  wireProviderAgentAudioIntoRecordingMix();
   providerSocket = new WebSocket(providerWebSocketUrl(tokenData.websocketPath));
   providerSocket.binaryType = "arraybuffer";
 
@@ -236,31 +245,60 @@ function configureProviderSession(tokenData, inputRate, outputRate) {
 
   if (currentVoiceProvider === "gemini") {
     sendEvent({
-      setup: {
-        model: `models/${tokenData.model}`,
-        generationConfig: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: "Kore",
-              },
+      setup: buildGeminiLiveSetup(tokenData),
+    });
+  }
+}
+
+/** Align live setup with Gemini ML Dev websocket logs; Gemini 3.1 native-audio rejects TEXT modality (~1011). */
+function buildGeminiLiveSetup(tokenData) {
+  const midRaw = String(tokenData.model ?? "");
+  const modelPath = midRaw.startsWith("models/") ? midRaw : `models/${midRaw}`;
+  const audioOnly = geminiNativeAudioLivePreview(modelPath);
+  /** @see https://github.com/googleapis/python-genai/issues/2238 — native-audio Flash Live rejects TEXT modality. */
+  const gc = audioOnly
+    ? {
+        responseModalities: ["AUDIO"],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: "Puck",
             },
           },
         },
-        systemInstruction: {
-          parts: [{ text: tokenData.instructions }],
-        },
-        tools: [
-          {
-            functionDeclarations: tokenData.tools.map(geminiFunctionDeclaration),
-          },
-        ],
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
-      },
-    });
+      }
+    : {
+        responseModalities: ["AUDIO", "TEXT"],
+      };
+  const decls = (tokenData.tools ?? []).map(geminiFunctionDeclaration).filter(Boolean);
+  const setup = {
+    model: modelPath,
+    generationConfig: gc,
+    systemInstruction: {
+      parts: [{ text: geminiTruncateSystemText(tokenData.instructions) }],
+    },
+  };
+  if (audioOnly) {
+    setup.outputAudioTranscription = {};
+    setup.inputAudioTranscription = {};
   }
+  if (decls.length > 0) {
+    setup.tools = [{ functionDeclarations: decls }];
+  }
+  return setup;
+}
+
+/** Gemini 3.x Flash Live / native-audio Live SKUs: audio modality only (+ transcription blobs at setup root). */
+function geminiNativeAudioLivePreview(modelPath) {
+  const m = String(modelPath ?? "").toLowerCase();
+  if (m.includes("gemini-3.1") && m.includes("live")) return true;
+  if (m.includes("native-audio")) return true;
+  return false;
+}
+
+function geminiTruncateSystemText(text, maxChars = 120_000) {
+  const s = String(text ?? "");
+  return s.length <= maxChars ? s : `${s.slice(0, maxChars)}\n…[instructions truncated]`;
 }
 
 async function stopSession() {
@@ -273,6 +311,7 @@ async function stopSession() {
   providerProcessor?.disconnect();
   providerInputSource?.disconnect();
   stopProviderPlayback();
+  teardownProviderAgentRecordingTap();
   providerInputContext?.close();
   providerOutputContext?.close();
 
@@ -301,7 +340,7 @@ async function startProviderAudioInput(inputRate) {
   providerInputSource = providerInputContext.createMediaStreamSource(mediaStream);
   providerProcessor = providerInputContext.createScriptProcessor(4096, 1, 1);
   providerProcessor.onaudioprocess = (event) => {
-    if (isPaymentCollectionActive || providerSocket?.readyState !== WebSocket.OPEN) return;
+    if (providerSocket?.readyState !== WebSocket.OPEN) return;
     const inputSamples = event.inputBuffer.getChannelData(0);
     handleProviderBargeIn(inputSamples);
     const pcmBase64 = float32ToBase64Pcm16(inputSamples);
@@ -329,25 +368,41 @@ async function startProviderAudioInput(inputRate) {
 async function handleRealtimeEvent(message) {
   const event = JSON.parse(message.data);
 
+  if (event.type === "conversation.item.truncated") {
+    deleteTranscriptDeltasMatchingAssistantItem(event.item_id);
+  }
+
+  if (event.type === "input_audio_buffer.speech_started") {
+    if (currentVoiceProvider === "openai") speechStartedTruncateOpenAiAssistantAudio();
+  }
+
   if (event.type === "response.audio.delta" || event.type === "response.output_audio.delta") {
     recordAgentFirstAudio();
+    if (event.item_id) recentAssistantAudioItemId = event.item_id;
   }
 
   if (event.type === "response.audio_transcript.delta" || event.type === "response.output_audio_transcript.delta") {
     recordAgentFirstAudio();
+    if (event.item_id) recentAssistantAudioItemId = event.item_id;
     appendAgentTranscriptDelta(event);
   }
 
   if (event.type === "response.audio_transcript.done" || event.type === "response.output_audio_transcript.done") {
     recordAgentFirstAudio();
-    const transcript = completeAgentTranscript(event);
-    if (transcript) {
-      log(`Lizzy: ${transcript}`);
-      addTranscript("agent", transcript);
-      recordAgentFinalTranscript(transcript);
+    const suppressKey = agentTranscriptKey(event);
+    if (suppressedAgentTranscriptCommitKeys.delete(suppressKey)) {
+      completeAgentTranscript(event);
+    } else {
+      const transcript = completeAgentTranscript(event);
+      if (transcript) {
+        log(`Lizzy: ${transcript}`);
+        addAssistantTranscriptLine(transcript);
+        recordAgentFinalTranscript(transcript);
+      }
     }
     agentAudioActive = false;
     agentResponseStartedAtMs = undefined;
+    resetAgentPlaybackTurnTracking();
   }
 
   if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
@@ -358,8 +413,11 @@ async function handleRealtimeEvent(message) {
 
   const call = extractFunctionCall(event);
   if (!call) return;
-  providerFunctionNames.set(call.callId, call.name);
-  const toolCallKey = call.callId || `${call.name}:${call.rawArguments ?? ""}`;
+  const toolCallKey =
+    call.callId !== undefined && call.callId !== null && `${call.callId}`.trim() !== ""
+      ? String(call.callId)
+      : `${call.name}:${call.rawArguments ?? ""}`;
+  providerFunctionNames.set(toolCallKey, call.name);
   if (handledToolCallIds.has(toolCallKey)) return;
   handledToolCallIds.add(toolCallKey);
 
@@ -368,18 +426,21 @@ async function handleRealtimeEvent(message) {
   const toolStartMs = performance.now();
   try {
     const args = call.rawArguments ? JSON.parse(call.rawArguments) : {};
-    savedToolCallId = addToolCall(call.name, args, call.callId);
+    savedToolCallId = addToolCall(call.name, args, toolCallKey);
 
     if (call.name === "update_collected_field") {
-      recordFieldUpdate(args.field, args.value);
-      draft[args.field] = args.value;
+      let value = args.value;
+      if (args.field === "phoneNumber") {
+        value = normalizePhoneForDraft(args.value);
+      }
+      recordFieldUpdate(args.field, value);
+      draft[args.field] = value;
       if (args.field === "firstName") {
         updateCustomerTranscriptLabels();
       }
       if (args.field === "vin") {
-        await decodeVin(args.value);
+        await decodeVin(value);
       }
-      readyForConfirmation = false;
       renderFields();
       output = {
         ok: true,
@@ -422,28 +483,7 @@ async function handleRealtimeEvent(message) {
         recordingStatus: draft.paymentTransaction?.status === "success" ? "resumed" : "paused",
       };
       log(`Payment detail captured: ${args.field} (not stored)`);
-    } else if (call.name === "mark_ready_for_confirmation") {
-      const missing = missingFields();
-      if (missing.length > 0) {
-        throw new Error(`Missing fields: ${missing.join(", ")}`);
-      }
-      const missingVehicle = missingVehicleFields();
-      if (missingVehicle.length > 0) {
-        throw new Error(`Missing vehicle details: ${missingVehicle.join(", ")}`);
-      }
-      if (!draft.quote) {
-        throw new Error("Mock quote has not been generated yet.");
-      }
-      const missingPayment = missingPaymentFields();
-      if (missingPayment.length > 0) {
-        throw new Error(`Missing payment details: ${missingPayment.join(", ")}`);
-      }
-      readyForConfirmation = true;
-      output = {
-        ok: true,
-        summary: summary(),
-      };
-    } else if (call.name === "generate_mock_quote") {
+    } else if (call.name === "generate_quote") {
       const missing = missingFields();
       const missingVehicle = missingVehicleFields();
       if (missing.length > 0 || missingVehicle.length > 0) {
@@ -451,14 +491,14 @@ async function handleRealtimeEvent(message) {
           `Cannot generate quote yet. Missing: ${[...missing, ...missingVehicle.map((field) => `vehicle.${field}`)].join(", ")}`,
         );
       }
-      draft.quote = generateMockQuote();
+      draft.quote = generateQuoteDraft();
       renderQuote();
       output = {
         ok: true,
         quote: draft.quote,
         summary: quoteSummary(),
       };
-      log(`Generated mock quote: ${quoteSummary()}`);
+      log(`Generated quote: ${quoteSummary()}`);
     } else if (call.name === "begin_payment_collection") {
       pauseConversationAudioRecording();
       output = {
@@ -485,8 +525,9 @@ async function handleRealtimeEvent(message) {
         instruction: "Answer directly and naturally from these GEICO auto-insurance results. Do not mention snippets, documents, data, searching, checking, reviewing, the app, or looking anything up. Synthesize the answer in your own words. If the results do not answer the question, say you can help with GEICO auto insurance quote and coverage questions.",
       };
     } else if (call.name === "save_confirmed_intake") {
-      if (!readyForConfirmation) {
-        throw new Error("The full summary must be read back before saving.");
+      const prerequisites = prerequisiteBlockingSaveReason();
+      if (prerequisites) {
+        throw new Error(prerequisites);
       }
       const saveStartMs = performance.now();
       const saveResponse = await fetch("/api/browser-intake", {
@@ -519,10 +560,14 @@ async function handleRealtimeEvent(message) {
     };
   }
 
+  if (!output.ok && output?.error) {
+    log(`Tool "${call.name}" failed: ${output.error}`);
+  }
+
   const toolDurationMs = Math.round(performance.now() - toolStartMs);
   updateToolCallOutput(savedToolCallId, output, toolDurationMs);
   recordToolEval(call.name, output, toolDurationMs);
-  sendToolOutput(call.callId, output);
+  sendToolOutput(toolCallKey, output);
 }
 
 async function handleProviderRealtimeMessage(message) {
@@ -532,7 +577,14 @@ async function handleProviderRealtimeMessage(message) {
   }
   const raw = typeof message.data === "string" ? message.data : await message.data.text?.();
   if (!raw) return;
-  const event = JSON.parse(raw);
+
+  let event;
+  try {
+    event = JSON.parse(raw);
+  } catch {
+    log(`Realtime message was not JSON (first 200 chars): ${String(raw).slice(0, 200)}`);
+    return;
+  }
 
   if (event.type === "provider.open") {
     log(`${event.provider} upstream connected (${event.model}).`);
@@ -554,34 +606,73 @@ async function handleProviderRealtimeMessage(message) {
     logOnce("providerAudio", `${currentVoiceProvider} audio started.`);
     playPcm16Base64(event.delta, 24000);
   }
-  if (event.type === "response.output_text.delta" || event.type === "response.text.delta") {
-    recordAgentFirstAudio();
-    appendAgentTranscriptDelta({
-      ...event,
-      response_id: event.response_id ?? "provider",
-      delta: event.delta ?? event.text ?? "",
-    });
-  }
-  if (event.type === "response.output_text.done" || event.type === "response.text.done") {
-    const transcript = completeAgentTranscript({
-      ...event,
-      response_id: event.response_id ?? "provider",
-      transcript: event.text ?? event.transcript,
-    });
-    if (transcript) {
-      log(`Lizzy: ${transcript}`);
-      addTranscript("agent", transcript);
-      recordAgentFinalTranscript(transcript);
-    }
-    agentAudioActive = false;
-    agentResponseStartedAtMs = undefined;
-  }
+  /** Do not persist `response.output_text*`: it can include text that never became speech; rely on output audio transcripts in `handleRealtimeEvent`. */
 
   await handleRealtimeEvent({ data: raw });
 }
 
+function finalizeGeminiSpeechTranscript() {
+  const transcript = completeAgentTranscript({ response_id: "gemini" });
+
+  agentAudioActive = false;
+  agentResponseStartedAtMs = undefined;
+  resetAgentPlaybackTurnTracking();
+
+  if (!transcript) return;
+
+  log(`Lizzy: ${transcript}`);
+  addAssistantTranscriptLine(transcript);
+  recordAgentFinalTranscript(transcript);
+}
+
+/** Gemini often streams output transcription as short spans; stitch so we don't log only the last fragment. */
+function mergeGeminiOutputTranscription(prevRaw, incomingRaw) {
+  const a = String(prevRaw ?? "").trim();
+  const b = String(incomingRaw ?? "").trim();
+  if (!b) return a;
+  if (!a) return b;
+  if (b.startsWith(a)) return b;
+  if (a.startsWith(b)) return a;
+  if (a.endsWith(b)) return a;
+  if (b.endsWith(a)) return b;
+  if (b.includes(a)) return b;
+  if (a.includes(b)) return a;
+  return `${a} ${b}`.replace(/\s+/g, " ").trim();
+}
+
+/** Normalize Gemini Live `toolCall.functionCalls`, snake_case aliases, and per-part declarations. */
+function collectGeminiFunctionCalls(event) {
+  const collected = [];
+  const pushAll = (calls) => {
+    if (!Array.isArray(calls)) return;
+    for (const c of calls) {
+      if (c && typeof c === "object") collected.push(c);
+    }
+  };
+
+  pushAll(event.toolCall?.functionCalls);
+  pushAll(event.toolCall?.function_calls);
+  pushAll(event.tool_call?.functionCalls);
+  pushAll(event.tool_call?.function_calls);
+
+  const sc = event.serverContent ?? event.server_content;
+  const parts = sc?.modelTurn?.parts ?? sc?.model_turn?.parts ?? [];
+  for (const part of parts) {
+    const fc = part.functionCall ?? part.function_call;
+    if (fc && typeof fc === "object") collected.push(fc);
+  }
+
+  return collected;
+}
+
 async function handleGeminiRealtimeEvent(event) {
-  if (event.setupComplete) {
+  const errPayload = event.error ?? event.error_details;
+  if (errPayload) {
+    log(`Gemini realtime error from server: ${JSON.stringify(errPayload).slice(0, 900)}`);
+    return;
+  }
+
+  if (event.setupComplete ?? event.setup_complete) {
     log("Gemini setup complete. Starting microphone stream.");
     setStatus("Connected to gemini. Speak into your microphone.");
     startProviderAudioInput(providerPendingInputRate);
@@ -589,7 +680,9 @@ async function handleGeminiRealtimeEvent(event) {
     return;
   }
 
-  const inputTranscript = event.inputTranscription ?? event.serverContent?.inputTranscription;
+  const sc = event.serverContent ?? event.server_content;
+  const inputTranscript =
+    event.inputTranscription ?? event.input_transcription ?? sc?.inputTranscription ?? sc?.input_transcription;
   if (inputTranscript?.text && inputTranscript.finished !== false) {
     await handleRealtimeEvent({
       data: JSON.stringify({
@@ -599,28 +692,21 @@ async function handleGeminiRealtimeEvent(event) {
     });
   }
 
-  const outputTranscript = event.outputTranscription ?? event.serverContent?.outputTranscription;
-  if (outputTranscript?.text) {
+  const outputTranscript =
+    event.outputTranscription ??
+    event.output_transcription ??
+    sc?.outputTranscription ??
+    sc?.output_transcription;
+  // Gemini may send overlapping phrases, deltas, or full cumulative text — stitch instead of overwriting.
+  if (outputTranscript?.text?.trim()) {
     recordAgentFirstAudio();
-    appendAgentTranscriptDelta({
-      response_id: "gemini",
-      delta: outputTranscript.text,
-    });
-    if (outputTranscript.finished !== false) {
-      const transcript = completeAgentTranscript({
-        response_id: "gemini",
-      });
-      if (transcript) {
-        log(`Lizzy: ${transcript}`);
-        addTranscript("agent", transcript);
-        recordAgentFinalTranscript(transcript);
-      }
-      agentAudioActive = false;
-      agentResponseStartedAtMs = undefined;
-    }
+    const prev = agentTranscriptDeltas.get("gemini") ?? "";
+    agentTranscriptDeltas.set("gemini", mergeGeminiOutputTranscription(prev, outputTranscript.text.trim()));
   }
 
-  const parts = event.serverContent?.modelTurn?.parts ?? event.serverContent?.model_turn?.parts ?? [];
+  const parts = sc?.modelTurn?.parts ?? sc?.model_turn?.parts ?? [];
+  const hasBufferedSpeech = typeof outputTranscript?.text === "string" && outputTranscript.text.trim() !== "";
+
   parts.forEach((part) => {
     const inlineData = part.inlineData ?? part.inline_data;
     if (inlineData?.data) {
@@ -628,30 +714,21 @@ async function handleGeminiRealtimeEvent(event) {
       logOnce("providerAudio", `${currentVoiceProvider} audio started.`);
       playPcm16Base64(inlineData.data, 24000);
     }
-    if (part.text) {
+    const partText = part.text;
+    if (!hasBufferedSpeech && partText) {
       recordAgentFirstAudio();
-      appendAgentTranscriptDelta({ response_id: "gemini", delta: part.text });
+      appendAgentTranscriptDelta({ response_id: "gemini", delta: partText });
     }
+    // Omit part.text when output_audio_transcription is active — it duplicates the same speech.
   });
 
-  if (event.serverContent?.turnComplete || event.serverContent?.turn_complete) {
-    const transcript = completeAgentTranscript({ response_id: "gemini" });
-    if (transcript) {
-      log(`Lizzy: ${transcript}`);
-      addTranscript("agent", transcript);
-      recordAgentFinalTranscript(transcript);
+  for (const functionCall of collectGeminiFunctionCalls(event)) {
+    const rawFcId = functionCall.id;
+    if (rawFcId === undefined || rawFcId === null || `${rawFcId}`.trim() === "") {
+      log(`Gemini tool call skipped — missing tool call id (function: ${functionCall.name ?? "unknown"}).`);
+      continue;
     }
-    agentAudioActive = false;
-    agentResponseStartedAtMs = undefined;
-  }
-
-  const functionCalls = [
-    ...(event.toolCall?.functionCalls ?? []),
-    ...(event.toolCall?.function_calls ?? []),
-    ...parts.map((part) => part.functionCall ?? part.function_call).filter(Boolean),
-  ];
-  for (const functionCall of functionCalls) {
-    const callId = functionCall.id ?? crypto.randomUUID();
+    const callId = String(rawFcId);
     const args = parseGeminiFunctionArgs(functionCall.args ?? functionCall.arguments ?? {});
     log(`Gemini tool call: ${functionCall.name}`);
     await handleRealtimeEvent({
@@ -663,15 +740,144 @@ async function handleGeminiRealtimeEvent(event) {
       }),
     });
   }
+
+  if (sc?.turnComplete || sc?.turn_complete) {
+    finalizeGeminiSpeechTranscript();
+  }
 }
 
 function parseGeminiFunctionArgs(args) {
-  if (typeof args !== "string") return args ?? {};
-  try {
-    return JSON.parse(args);
-  } catch {
-    return {};
+  if (typeof args === "string") {
+    try {
+      return JSON.parse(args);
+    } catch {
+      return {};
+    }
   }
+  if (!args || typeof args !== "object") return {};
+  if (typeof args.fields === "object" && args.fields !== null && !Array.isArray(args.fields)) {
+    return structFieldsToPlainObject(args.fields);
+  }
+  return args;
+}
+
+/** Best-effort conversion when args arrive as protobuf Struct JSON `{ fields: { k: { stringValue: ... } } }`. */
+function structFieldsToPlainObject(fields) {
+  const out = {};
+  for (const [key, wrapped] of Object.entries(fields)) {
+    if (!wrapped || typeof wrapped !== "object") continue;
+    if (wrapped.stringValue !== undefined) out[key] = wrapped.stringValue;
+    else if (wrapped.numberValue !== undefined) out[key] = wrapped.numberValue;
+    else if (wrapped.boolValue !== undefined) out[key] = wrapped.boolValue;
+    else if (wrapped.structValue?.fields) out[key] = structFieldsToPlainObject(wrapped.structValue.fields);
+    else if (Array.isArray(wrapped.listValue?.values)) out[key] = wrapped.listValue.values.map(protoValueToJs);
+  }
+  return out;
+}
+
+function protoValueToJs(wrapped) {
+  if (!wrapped || typeof wrapped !== "object") return wrapped;
+  if (wrapped.stringValue !== undefined) return wrapped.stringValue;
+  if (wrapped.numberValue !== undefined) return wrapped.numberValue;
+  if (wrapped.boolValue !== undefined) return wrapped.boolValue;
+  if (wrapped.structValue?.fields) return structFieldsToPlainObject(wrapped.structValue.fields);
+  if (Array.isArray(wrapped.listValue?.values)) return wrapped.listValue.values.map(protoValueToJs);
+  return undefined;
+}
+
+function estimateOpenAiAssistantAudioHeardMs() {
+  if (!remoteAudio) return undefined;
+  try {
+    return Math.round(Math.max(0, remoteAudio.currentTime) * 1000);
+  } catch {
+    return undefined;
+  }
+}
+
+function speechStartedTruncateOpenAiAssistantAudio() {
+  if (!recentAssistantAudioItemId || !agentAudioActive) return;
+  const ms = estimateOpenAiAssistantAudioHeardMs();
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  sendEvent({
+    type: "conversation.item.truncate",
+    item_id: recentAssistantAudioItemId,
+    content_index: 0,
+    audio_end_ms: ms,
+  });
+}
+
+function deleteTranscriptDeltasMatchingAssistantItem(itemId) {
+  if (itemId === undefined || itemId === null || `${itemId}`.trim() === "") return;
+  const needle = `${itemId}`;
+  for (const key of [...agentTranscriptDeltas.keys()]) {
+    if (key === needle || key.split(":").includes(needle)) {
+      agentTranscriptDeltas.delete(key);
+    }
+  }
+}
+
+function resetAgentPlaybackTurnTracking() {
+  agentTurnPlaybackSlices = [];
+}
+
+function recordAgentPlaybackSlice(startAtSeconds, durationSeconds) {
+  if (!(durationSeconds > 0) || !providerOutputContext) return;
+  if (!(currentVoiceProvider === "gemini" || currentVoiceProvider === "grok")) return;
+  agentTurnPlaybackSlices.push({ startAt: startAtSeconds, endAt: startAtSeconds + durationSeconds });
+}
+
+/** How much of the scheduled agent PCM in this turn had started playing before `stopAudioContextClock`. */
+function approximateWordsHeardFraction(stopAudioContextClock) {
+  if (!agentTurnPlaybackSlices.length) return 0;
+  let heardSec = 0;
+  let scheduledSec = 0;
+  for (const { startAt, endAt } of agentTurnPlaybackSlices) {
+    scheduledSec += endAt - startAt;
+    const overlapEnd = Math.min(endAt, stopAudioContextClock);
+    heardSec += Math.max(0, overlapEnd - startAt);
+  }
+  if (scheduledSec < 1e-4) return 0;
+  return Math.min(1, Math.max(0, heardSec / scheduledSec));
+}
+
+function truncateTranscriptToApproxPlayedRatio(fullText, ratio) {
+  const text = String(fullText ?? "").trim();
+  if (!text || ratio >= 0.997) return text;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!words.length) return text;
+  if (ratio <= 0.01) return "";
+  const n = Math.min(words.length, Math.floor(words.length * ratio));
+  if (n < 1) return "";
+  return words.slice(0, n).join(" ");
+}
+
+function commitInterruptedProviderAgentTranscripts() {
+  if (currentVoiceProvider !== "gemini" && currentVoiceProvider !== "grok") return;
+  if (!providerOutputContext) return;
+  const stopClock = providerOutputContext.currentTime;
+  const ratio = approximateWordsHeardFraction(stopClock);
+  if (ratio >= 0.88) {
+    resetAgentPlaybackTurnTracking();
+    return;
+  }
+  const keysSnapshot = [...agentTranscriptDeltas.keys()];
+  for (const key of keysSnapshot) {
+    const pending = agentTranscriptDeltas.get(key);
+    if (!pending?.trim()) {
+      agentTranscriptDeltas.delete(key);
+      suppressedAgentTranscriptCommitKeys.delete(key);
+      continue;
+    }
+    const spoken = truncateTranscriptToApproxPlayedRatio(pending, ratio).trim();
+    agentTranscriptDeltas.delete(key);
+    if (currentVoiceProvider === "grok") suppressedAgentTranscriptCommitKeys.add(key);
+    if (spoken) {
+      log(`Lizzy: ${spoken}`);
+      addAssistantTranscriptLine(spoken);
+      recordAgentFinalTranscript(spoken);
+    }
+  }
+  resetAgentPlaybackTurnTracking();
 }
 
 function appendAgentTranscriptDelta(event) {
@@ -710,22 +916,48 @@ function extractFunctionCall(event) {
   return undefined;
 }
 
+/**
+ * After `tool_response`, Gemini Live resumes generation once the client queues more input (see sync tools).
+ * OpenAI bridges this via `response.create`; here we mirror with `realtimeInput.text`.
+ */
+function geminiRealtimeNudgeAfterTool(toolName, output) {
+  const name = toolName ?? "";
+  if (!output?.ok && output?.error !== undefined && output?.error !== null && output?.error !== "") {
+    return `The "${name}" tool failed: ${String(output.error).slice(0, 400)}. Speak briefly that something went wrong, fix it, then continue naturally.`;
+  }
+  if (output?.ok && name === "generate_quote") {
+    return (
+      "generate_quote succeeded. Immediately tell the caller the monthly premium, term length, and coverage summary exactly as returned—do not paraphrase as free numbers beforehand. Proceed toward checkout flows using tools."
+    );
+  }
+  if (output?.ok && name === "save_confirmed_intake") {
+    return (
+      "save_confirmed_intake succeeded. Briefly reassure them their quote details were saved. If they requested an id reference, summarize from the tool output only."
+    );
+  }
+  if (output?.ok && name === "begin_payment_collection") {
+    return (
+      "You just called begin_payment_collection (recording paused for privacy). Immediately continue aloud with Lizzy's next scripted checkout line—the first concrete payment question—and keep guiding the caller; do not wait for extra silence."
+    );
+  }
+  return undefined;
+}
+
 function sendToolOutput(callId, output) {
   if (currentVoiceProvider === "gemini") {
+    const fname = providerFunctionNames.get(callId);
     sendEvent({
       toolResponse: {
         functionResponses: [
           {
-            id: callId,
-            name: providerFunctionNames.get(callId),
-            response: {
-              result: output,
-            },
+            id: String(callId),
+            name: fname ?? "unknown_tool",
+            response: { output },
           },
         ],
       },
     });
-    sendResponseCreate();
+    sendResponseCreate(geminiRealtimeNudgeAfterTool(fname ?? "", output));
     return;
   }
 
@@ -744,14 +976,8 @@ function sendToolOutput(callId, output) {
 function sendResponseCreate(instructions) {
   if (currentVoiceProvider === "gemini") {
     sendEvent({
-      clientContent: {
-        turns: [
-          {
-            role: "user",
-            parts: [{ text: instructions ?? "Please continue." }],
-          },
-        ],
-        turnComplete: true,
+      realtimeInput: {
+        text: instructions ?? "Please continue.",
       },
     });
     return;
@@ -784,6 +1010,25 @@ function missingVehicleFields() {
 
 function missingPaymentFields() {
   return paymentFields.filter((field) => draft.payment?.[field] === undefined || draft.payment?.[field] === "");
+}
+
+function prerequisiteBlockingSaveReason() {
+  const missingPersonal = missingFields();
+  if (missingPersonal.length > 0) {
+    return `Cannot save yet. Missing required fields: ${missingPersonal.join(", ")}.`;
+  }
+  const missingVehicle = missingVehicleFields();
+  if (missingVehicle.length > 0) {
+    return `Cannot save yet. Missing vehicle details: ${missingVehicle.join(", ")}.`;
+  }
+  if (!draft.quote) {
+    return "Cannot save yet. A quote must be generated first.";
+  }
+  const missingPayment = missingPaymentFields();
+  if (missingPayment.length > 0) {
+    return `Cannot save yet. Missing payment fields: ${missingPayment.join(", ")}.`;
+  }
+  return null;
 }
 
 function summary() {
@@ -867,14 +1112,14 @@ function renderPayment() {
     .join("");
 }
 
-function generateMockQuote() {
+function generateQuoteDraft() {
   const monthlyPremium = Math.floor(Math.random() * 96) + 85;
 
   return {
     monthlyPremium,
     termMonths: 6,
     coverageSummary:
-      "Mock full auto package including liability, comprehensive, collision, medical payments or PIP where applicable, uninsured or underinsured motorist coverage, and roadside support.",
+      "Full auto package including liability, comprehensive, collision, medical payments or PIP where applicable, uninsured or underinsured motorist coverage, and roadside support.",
   };
 }
 
@@ -891,6 +1136,19 @@ function paymentSummary() {
 
   const lastFour = payment.cardNumber?.slice(-4);
   return lastFour ? `card ending in ${lastFour}; not stored` : "partially collected; not stored";
+}
+
+function normalizePhoneForDraft(value) {
+  const raw =
+    typeof value === "number" && Number.isFinite(value)
+      ? String(Math.trunc(value))
+      : String(value ?? "").trim();
+  const digits = raw.replace(/\D/g, "");
+  const ten = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+  if (!/^\d{10}$/.test(ten)) {
+    throw new Error("Phone must be 10 US digits, or 11 digits beginning with country code 1 (+1).");
+  }
+  return ten;
 }
 
 function normalizePaymentValue(field, value) {
@@ -974,14 +1232,13 @@ function beginConversation(voiceModel = getSelectedVoiceModel()) {
     recordingNote:
       "Conversation audio is stored as one mixed file. Recording pauses during payment collection and resumes after the transaction succeeds.",
     transcriptNote:
-      "Transcript entries are saved from completed Realtime audio transcript events, not from summaries. Payment collection transcript is omitted because payment audio is not recorded.",
+      "Lizzy's lines are captured from realtime output-audio transcripts. After barge-in we trim Gemini/Grok text to approximate played PCM; WebRTC/OpenAI asks the server to truncate unheard assistant audio.",
     evals: {
       responseLatencies: [],
       toolDurations: [],
       corrections: [],
       fieldsCorrected: [],
       reAskCount: 0,
-      toolOverwriteCount: 0,
       interruptionCount: 0,
       silentFailureCount: 0,
       timeToCompletionSaveMs: undefined,
@@ -998,6 +1255,10 @@ function beginConversation(voiceModel = getSelectedVoiceModel()) {
   agentResponseStartedAtMs = undefined;
   handledToolCallIds.clear();
   oneTimeLogs.clear();
+  agentTranscriptDeltas.clear();
+  suppressedAgentTranscriptCommitKeys.clear();
+  resetAgentPlaybackTurnTracking();
+  recentAssistantAudioItemId = undefined;
   log(`Conversation recording started (${displayVoiceModel(voiceModel)})`);
 }
 
@@ -1018,7 +1279,6 @@ function ensureEvals() {
   conversation.evals.corrections ??= [];
   conversation.evals.fieldsCorrected ??= [];
   conversation.evals.reAskCount ??= 0;
-  conversation.evals.toolOverwriteCount ??= 0;
   conversation.evals.interruptionCount ??= 0;
   conversation.evals.silentFailureCount ??= 0;
   return conversation.evals;
@@ -1075,7 +1335,6 @@ function recordFieldUpdate(field, value) {
   if (!evals || !field) return;
   const previousValue = draft[field];
   if (previousValue !== undefined && previousValue !== "" && String(previousValue) !== String(value)) {
-    evals.toolOverwriteCount += 1;
     const correctionEndMs = elapsedAudioMs();
     const anchors = correctionPlaybackAnchors(correctionEndMs, field, previousValue, value);
     evals.corrections.push({
@@ -1176,6 +1435,36 @@ function addTranscript(role, text) {
   });
 }
 
+/** Extends the last Lizzy line when Gemini/Grok sends incremental transcription of the same utterance. */
+function addAssistantTranscriptLine(text) {
+  if (!conversation) return;
+  if (isPaymentCollectionActive) return;
+  const next = String(text ?? "").trim();
+  if (!next) return;
+  const rows = conversation.transcripts;
+  const last = rows[rows.length - 1];
+  if (last?.sourceRole === "agent") {
+    const prev = String(last.text ?? "").trim();
+    if (prev && next.startsWith(prev)) {
+      last.text = next;
+      return;
+    }
+    if (prev && prev.startsWith(next) && next.length < prev.length) {
+      return;
+    }
+  }
+  const speaker = transcriptSpeaker("agent");
+  rows.push({
+    id: crypto.randomUUID(),
+    role: speaker,
+    speaker,
+    sourceRole: "agent",
+    text: next,
+    timestampMs: elapsedAudioMs(),
+    audioTrack: "conversation",
+  });
+}
+
 function transcriptSpeaker(role) {
   return role === "agent" ? "Lizzy" : customerTranscriptName();
 }
@@ -1252,6 +1541,20 @@ function startConversationAudioRecording(userStream) {
 function addAgentAudioToConversationRecording(agentStream) {
   if (!audioContext || !mixedAudioDestination || agentStream.getAudioTracks().length === 0) return;
   audioContext.createMediaStreamSource(agentStream).connect(mixedAudioDestination);
+}
+
+function wireProviderAgentAudioIntoRecordingMix() {
+  if (!providerOutputContext || !audioContext || !mixedAudioDestination) return;
+  teardownProviderAgentRecordingTap();
+  providerAgentCaptureDestination = providerOutputContext.createMediaStreamDestination();
+  providerAgentCaptureIntoMix = audioContext.createMediaStreamSource(providerAgentCaptureDestination.stream);
+  providerAgentCaptureIntoMix.connect(mixedAudioDestination);
+}
+
+function teardownProviderAgentRecordingTap() {
+  providerAgentCaptureIntoMix?.disconnect();
+  providerAgentCaptureIntoMix = undefined;
+  providerAgentCaptureDestination = undefined;
 }
 
 function pickMimeType() {
@@ -1373,11 +1676,42 @@ function vehicleSummary() {
 }
 
 function geminiFunctionDeclaration(tool) {
-  return {
+  const declaration = {
     name: tool.name,
-    description: tool.description,
-    parameters: geminiSchema(tool.parameters),
+    description: String(tool.description ?? ""),
   };
+  const parameters = coerceGeminiFunctionParameters(tool.parameters);
+  if (parameters !== undefined) {
+    declaration.parameters = parameters;
+  }
+  return declaration;
+}
+
+/**
+ * Omit empty `{}` Gemini declarations when they break setup—but **no-parameters** MUST still declare JSON fields
+ * or Gemini often omits/skips invoking generate_quote / save_confirmed_intake reliably.
+ */
+function coerceGeminiFunctionParameters(parameters) {
+  const schema = geminiSchema(parameters);
+  if (!schema || typeof schema !== "object") return schema;
+  if (isMeaningfulOpenApiLikeSchema(schema)) return schema;
+  return {
+    type: "object",
+    properties: {
+      _omit: {
+        type: "string",
+        description: "Optional; ignore. This tool accepts no meaningful arguments.",
+      },
+    },
+  };
+}
+
+function isMeaningfulOpenApiLikeSchema(schema) {
+  const props = schema.properties;
+  const required = schema.required;
+  if (props && typeof props === "object" && Object.keys(props).length > 0) return true;
+  if (Array.isArray(required) && required.length > 0) return true;
+  return false;
 }
 
 function geminiSchema(value) {
@@ -1426,31 +1760,24 @@ function playPcm16Bytes(bytes, sampleRate) {
   const source = providerOutputContext.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(providerOutputContext.destination);
-  recordProviderAudioSamples(samples, sampleRate);
+  if (providerAgentCaptureDestination) {
+    source.connect(providerAgentCaptureDestination);
+  }
   providerOutputSources.add(source);
   source.addEventListener("ended", () => {
     providerOutputSources.delete(source);
   });
   const startAt = Math.max(providerOutputContext.currentTime, providerOutputCursor);
+  recordAgentPlaybackSlice(startAt, audioBuffer.duration);
   source.start(startAt);
   providerOutputCursor = startAt + audioBuffer.duration;
 }
 
-function recordProviderAudioSamples(samples, sampleRate) {
-  if (!audioContext || !mixedAudioDestination || !samples.length) return;
-  const recordingBuffer = audioContext.createBuffer(1, samples.length, sampleRate);
-  recordingBuffer.copyToChannel(samples, 0);
-  const recordingSource = audioContext.createBufferSource();
-  recordingSource.buffer = recordingBuffer;
-  recordingSource.connect(mixedAudioDestination);
-  const delaySeconds = providerOutputContext ? Math.max(0, providerOutputCursor - providerOutputContext.currentTime) : 0;
-  recordingSource.start(audioContext.currentTime + delaySeconds);
-}
-
 function handleProviderBargeIn(samples) {
   if (currentVoiceProvider === "openai" || providerBargeInActive || !providerAudioIsQueued()) return;
-  if (rootMeanSquare(samples) < 0.035) return;
+  if (rootMeanSquare(samples) < 0.048) return;
   providerBargeInActive = true;
+  commitInterruptedProviderAgentTranscripts();
   stopProviderPlayback();
   if (currentVoiceProvider === "grok") {
     sendEvent({ type: "response.cancel" });

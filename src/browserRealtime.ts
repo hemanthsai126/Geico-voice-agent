@@ -1,144 +1,38 @@
 import type { Request, Response } from "express";
 import type { AppConfig } from "./config.js";
+import { buildRealtimeIntakeInstructions, type VoiceCallMode } from "./prompts/index.js";
 import { saveConfirmedIntake } from "./firebase.js";
 import { searchGeicoAutoKnowledge } from "./geicoKnowledge.js";
-import { intakeAgentInstructions } from "./agentInstructions.js";
 import { parseConfirmedIntake } from "./intake.js";
+import { realtimeIntakeTools } from "./realtimeTools.js";
 import { decodeVin } from "./vinDecoder.js";
 
-const tools = [
-  {
-    type: "function",
-    name: "update_collected_field",
-    description: "Update one collected intake field after the user provides or corrects it.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        field: {
-          type: "string",
-          enum: ["firstName", "lastName", "age", "address", "email", "phoneNumber", "driverLicenseNumber", "vin"],
-        },
-        value: {
-          type: ["string", "number"],
-        },
-      },
-      required: ["field", "value"],
-    },
-  },
-  {
-    type: "function",
-    name: "update_vehicle_field",
-    description: "Update one missing vehicle detail after VIN decoding leaves it blank or the user corrects it.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        field: {
-          type: "string",
-          enum: ["year", "make", "model", "trim"],
-        },
-        value: {
-          type: "string",
-        },
-      },
-      required: ["field", "value"],
-    },
-  },
-  {
-    type: "function",
-    name: "collect_payment_detail",
-    description: "Collect one mock payment detail in runtime memory only. These details must never be saved to Firebase.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        field: {
-          type: "string",
-          enum: ["cardNumber", "expirationMonth", "expirationYear", "cvv"],
-        },
-        value: {
-          type: "string",
-        },
-      },
-      required: ["field", "value"],
-    },
-  },
-  {
-    type: "function",
-    name: "begin_payment_collection",
-    description: "Call immediately before asking for payment details so observability audio recording can stop before card data is spoken.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    type: "function",
-    name: "mark_ready_for_confirmation",
-    description: "Use only after every required intake field has been collected.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    type: "function",
-    name: "save_confirmed_intake",
-    description: "Save the intake only after the user explicitly confirms the full summary.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    type: "function",
-    name: "search_auto_insurance_knowledge",
-    description: "Search the local GEICO auto-insurance knowledge base before answering auto-insurance questions.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        query: {
-          type: "string",
-        },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    type: "function",
-    name: "generate_mock_quote",
-    description: "Generate a mock vehicle-insurance quote after all required customer and vehicle details are captured.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-      required: [],
-    },
-  },
-];
+const tools = realtimeIntakeTools.map((tool) =>
+  structuredClone(tool as unknown as Record<string, unknown>),
+) as unknown[];
+
+function voiceCallModeFromRequest(req: Request, config: AppConfig): VoiceCallMode {
+  const raw = typeof req.query.mode === "string" ? req.query.mode.trim().toLowerCase() : "";
+  if (raw === "outbound") return "outbound";
+  if (raw === "inbound") return "inbound";
+  return config.CALL_MODE;
+}
 
 export function handleBrowserRealtimeToken(config: AppConfig) {
   return async (req: Request, res: Response) => {
     try {
-      const mode = req.query.mode === "outbound" ? "outbound" : "inbound";
+      const mode = voiceCallModeFromRequest(req, config);
       const requestedProvider = String(req.query.provider ?? config.VOICE_MODEL_PROVIDER);
       const provider = requestedProvider === "grok" || requestedProvider === "gemini" ? requestedProvider : "openai";
       const model = String(req.query.model ?? modelForProvider(config, provider));
+      const instructions = buildRealtimeIntakeInstructions(mode, { provider, model });
 
       if (provider !== "openai") {
         res.json({
           provider,
           model,
           websocketPath: `/api/provider-realtime?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
-          instructions: `${intakeAgentInstructions}\n\nCall mode: ${mode}.`,
+          instructions,
           tools,
           audio: provider === "gemini" ? { inputRate: 16000, outputRate: 24000 } : { inputRate: 24000, outputRate: 24000 },
         });
@@ -159,7 +53,7 @@ export function handleBrowserRealtimeToken(config: AppConfig) {
           session: {
             type: "realtime",
             model,
-            instructions: `${intakeAgentInstructions}\n\nCall mode: ${mode}.`,
+            instructions,
             audio: {
               input: {
                 transcription: {

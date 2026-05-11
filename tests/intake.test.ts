@@ -5,6 +5,7 @@ import {
   createCallState,
   attachVehicleInfo,
   markReadyForConfirmation,
+  parseConfirmedIntake,
   summarizeIntake,
   updateField,
   updatePaymentField,
@@ -35,8 +36,26 @@ describe("intake state", () => {
     assert.equal(state.draft.vin, "1HGCM82633A004352");
   });
 
-  it("requires phone number to be exactly 10 digits", () => {
-    assert.throws(() => updateField(createCallState(), "phoneNumber", "+15125550123"), /exactly 10 digits/);
+  it("normalizes +1 NANP phones, punctuation, or numeric payloads to ten digits", () => {
+    let state = updateField(createCallState(), "phoneNumber", "+15125550123");
+    assert.equal(state.draft.phoneNumber, "5125550123");
+
+    state = updateField(createCallState(), "phoneNumber", "+1 (512) 555-0123");
+    assert.equal(state.draft.phoneNumber, "5125550123");
+
+    state = updateField(createCallState(), "phoneNumber", 15125550123);
+    assert.equal(state.draft.phoneNumber, "5125550123");
+  });
+
+  it("rejects phones that cannot be reduced to exactly ten NANP digits", () => {
+    assert.throws(() => updateField(createCallState(), "phoneNumber", "+447700900123"), /exactly 10 digits/);
+    assert.throws(() => updateField(createCallState(), "phoneNumber", "12345"), /exactly 10 digits/);
+  });
+
+  it("parses confirmed intake payloads with optional +1 on save", () => {
+    const baseline = confirmIntake(completeReadyState());
+    const reparsed = parseConfirmedIntake({ ...baseline, phoneNumber: "+1 512 555 0123" });
+    assert.equal(reparsed.phoneNumber, "5125550123");
   });
 
   it("does not allow confirmation until every field is present", () => {
@@ -99,7 +118,7 @@ describe("intake state", () => {
       trim: "EX",
     });
 
-    assert.throws(() => markReadyForConfirmation(state), /Mock quote/);
+    assert.throws(() => markReadyForConfirmation(state), /A quote has not been generated|quote has not been generated/i);
   });
 
   it("summarizes missing and captured values for readback", () => {

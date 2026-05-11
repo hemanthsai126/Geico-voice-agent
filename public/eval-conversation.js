@@ -101,57 +101,71 @@ function renderCharts(item) {
     color: ["#5a8aaa", "#87afc7", "#1e2030", "#778899", "#b0cfe0"][index % 5],
   }));
 
-  chartsEl.innerHTML = [
-    chartCard(
-      "Turn-by-Turn Response Latency",
-      "Each point is one user turn followed by Lizzy's response.",
-      responsePoints.length
-        ? lineChart(
-            [
-              {
-                label: "Response start",
-                values: responsePoints.map((point) => point.avgFirstAudioLatencyMs),
-                color: "#5a8aaa",
-              },
-              {
-                label: "Response complete",
-                values: responsePoints.map((point) => point.avgFinalTranscriptLatencyMs),
-                color: "#111827",
-              },
-            ],
-            responsePoints,
-            formatMs,
-            {
-              xLabel: "User turn timestamp in conversation audio",
-              yLabel: "Latency in milliseconds/seconds",
-            },
-          )
-        : `<p class="status">No response latency samples captured for this conversation.</p>`,
-    ),
-    chartCard(
-      "Tool And RAG Runtime",
-      "Shows the measured tool runtime and RAG-specific retrieval time.",
-      lineChart(
+  const responseLatencyChartInner = responsePoints.length
+    ? lineChart(
         [
           {
-            label: "Tool runtime",
-            values: toolPoints.map((point) => point.avgToolDurationMs),
-            color: "#87afc7",
+            label: "Response start",
+            values: responsePoints.map((point) => point.avgFirstAudioLatencyMs),
+            color: "#5a8aaa",
           },
           {
-            label: "RAG runtime",
-            values: toolPoints.map((point) => point.ragLatencyMs),
-            color: "#1e2030",
+            label: "Response complete",
+            values: responsePoints.map((point) => point.avgFinalTranscriptLatencyMs),
+            color: "#111827",
           },
         ],
-        toolPoints,
+        responsePoints,
         formatMs,
         {
-          xLabel: "RAG tool-call timestamp in conversation audio",
-          yLabel: "Runtime in milliseconds/seconds",
+          xLabel: "User turn timestamp in conversation audio",
+          yLabel: "Latency in milliseconds/seconds",
         },
-      ),
-    ),
+      )
+    : `<p class="status">No response latency samples captured for this conversation.</p>`;
+
+  const toolRuntimeChartInner = lineChart(
+    [
+      {
+        label: "Tool runtime",
+        values: toolPoints.map((point) => point.avgToolDurationMs),
+        color: "#87afc7",
+      },
+      {
+        label: "RAG runtime",
+        values: toolPoints.map((point) => point.ragLatencyMs),
+        color: "#1e2030",
+      },
+    ],
+    toolPoints,
+    formatMs,
+    {
+      xLabel: "RAG tool-call timestamp in conversation audio",
+      yLabel: "Runtime in milliseconds/seconds",
+    },
+  );
+
+  chartsEl.innerHTML = [
+    `
+    <section class="card chart-card chart-card-latency-combo">
+      <div>
+        <h2>Latency &amp; runtime</h2>
+        <p>
+          Time from user turns to Lizzy responding, plus tool and RAG retrieval duration for each knowledge search tool call—all in one wide pane for easier scanning.
+        </p>
+      </div>
+      <div class="latency-combo-charts">
+        <div class="latency-combo-block">
+          <h3>Turn-by-turn response latency</h3>
+          ${responseLatencyChartInner}
+        </div>
+        <div class="latency-combo-block">
+          <h3>Tool &amp; RAG runtime</h3>
+          ${toolRuntimeChartInner}
+        </div>
+      </div>
+    </section>
+    `,
     chartCard(
       "Tool Usage Breakdown",
       "Counts exactly which tools were used in this conversation.",
@@ -175,25 +189,20 @@ function renderCharts(item) {
     ),
     chartCard(
       "Corrections In This Conversation",
-      "Bar graph of correction and overwrite counts for this conversation.",
+      "Updates that replaced an already captured intake field with a different value.",
       groupedBarChart(
         [
           {
-            label: "Corrections",
+            label: "Field corrections",
             values: [item.correctionCount],
             color: "#5a8aaa",
-          },
-          {
-            label: "Overwrites",
-            values: [item.toolOverwriteCount],
-            color: "#87afc7",
           },
         ],
         [item],
         String,
         {
           xLabel: "This conversation",
-          yLabel: "Correction/overwrite count",
+          yLabel: "Correction count",
         },
       ),
     ),

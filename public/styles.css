@@ -514,6 +514,20 @@ audio {
   font-size: 0.92rem;
 }
 
+  display: grid;
+  gap: 28px;
+  margin-top: 16px;
+}
+
+.latency-combo-block h3 {
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin: 0 0 10px;
+  text-transform: none;
+}
+
 .eval-summary-grid,
 .eval-metric-grid {
   display: grid;
@@ -545,12 +559,6 @@ audio {
 
 .conversation-eval-workbench .eval-conversation-pane {
   max-height: calc(100vh - 72px);
-}
-
-@media (min-width: 1280px) {
-  .conversation-eval-workbench .eval-chart-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 1000px) {
@@ -852,6 +860,98 @@ audio {
   padding: 16px;
 }
 
+/* RAG analysis (/rag-analysis) — full main column width */
+
+.rag-analysis-shell {
+  max-width: none;
+  width: 100%;
+}
+
+.rag-analysis-main {
+  display: grid;
+  gap: 28px;
+  max-width: none;
+  width: 100%;
+}
+
+.rag-footnote {
+  color: var(--muted);
+  font-size: 0.87rem;
+  margin: -8px 0 8px;
+  max-width: none;
+  width: 100%;
+}
+
+.rag-page-bar-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.rag-page-bar-row {
+  align-items: center;
+  column-gap: clamp(12px, 2vw, 24px);
+  display: grid;
+  font-size: 0.86rem;
+  grid-template-columns:
+    minmax(0, clamp(260px, 34vw, 560px))
+    minmax(120px, 1fr)
+    minmax(72px, 5.25rem);
+  row-gap: 4px;
+}
+
+.rag-page-bar-label {
+  color: var(--ink);
+  font-weight: 700;
+  hyphens: auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rag-page-bar-label span {
+  cursor: default;
+  display: block;
+}
+
+.rag-page-bar-track {
+  background: rgb(148 163 184 / 20%);
+  border-radius: 999px;
+  height: 12px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.rag-page-bar-fill {
+  background: linear-gradient(90deg, #5a8aaa, #1e293b);
+  border-radius: 999px;
+  height: 100%;
+}
+
+.rag-page-bar-count {
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+.rag-page-bar-count small {
+  color: var(--muted);
+  display: inline-block;
+  font-size: 0.78rem;
+  margin-inline-start: 6px;
+  min-inline-size: 2.75ch;
+}
+
+@media (max-width: 900px) {
+  .rag-page-bar-row {
+    grid-template-columns: 1fr;
+  }
+
+  .rag-page-bar-count {
+    justify-self: end;
+    padding-inline-end: 2px;
+  }
+}
+
 @media (max-width: 900px) {
   .eval-failure-log-row {
     grid-template-columns: 1fr;
@@ -1144,10 +1244,11 @@ audio {
 .chart-x-axis {
   color: var(--muted);
   display: flex;
-  font-size: 0.75rem;
+  font-size: 0.64rem;
   font-weight: 700;
-  gap: 8px;
+  gap: 6px;
   justify-content: space-between;
+  line-height: 1.25;
   margin-top: 10px;
   text-align: center;
 }
@@ -1259,7 +1360,7 @@ audio {
 
 .bar-label {
   color: var(--muted);
-  font-size: 0.76rem;
+  font-size: 0.65rem;
   font-weight: 800;
   overflow: hidden;
   text-align: center;

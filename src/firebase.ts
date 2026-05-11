@@ -30,7 +30,7 @@ export function buildIntakeRecord({ callSid, intake }: SaveIntakeInput) {
   return {
     ...intake,
     status: "confirmed" as const,
-    twilioCallSid: callSid,
+    voiceSessionId: callSid,
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
   };

@@ -34,12 +34,14 @@ export type IntakeDraft = {
 };
 
 export type CallState = {
-  callSid?: string;
-  streamSid?: string;
   status: IntakeStatus;
   draft: IntakeDraft;
   missingFields: IntakeField[];
   updatedAt: Date;
+  /** Set by Twilio Media Streams (`realtimeBridge`) for audio routing / save. */
+  streamSid?: string;
+  /** Set by Twilio (`realtimeBridge`) for Firebase linkage on save. */
+  callSid?: string;
 };
 
 export type VehicleInfo = {
@@ -65,17 +67,21 @@ export type PaymentInfo = {
 
 export type ConfirmedIntake = Required<Omit<IntakeDraft, "payment">>;
 
+function nanpNormalizePhoneDigits(raw: unknown): string {
+  const text =
+    typeof raw === "number" && Number.isFinite(raw) ? String(Math.trunc(raw)) : String(raw ?? "").trim();
+  const digits = text.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits;
+}
+
 export const confirmedIntakeSchema = z.object({
   firstName: z.string().trim().min(1),
   lastName: z.string().trim().min(1),
   age: z.coerce.number().int().min(16).max(120),
   address: z.string().trim().min(1),
   email: z.string().trim().email().transform((value) => value.toLowerCase()),
-  phoneNumber: z
-    .string()
-    .trim()
-    .transform((value) => value.replace(/[\s().-]/g, ""))
-    .pipe(z.string().regex(/^\d{10}$/, "Phone number must be exactly 10 digits.")),
+  phoneNumber: z.preprocess(nanpNormalizePhoneDigits, z.string().regex(/^\d{10}$/, "Phone number must be exactly 10 digits.")),
   driverLicenseNumber: z.string().trim().min(1),
   vin: z
     .string()
@@ -166,7 +172,7 @@ export function markReadyForConfirmation(state: CallState): CallState {
   }
 
   if (!refreshed.draft.quote) {
-    throw new Error("Cannot confirm yet. Mock quote has not been generated.");
+    throw new Error("Cannot confirm yet. A quote has not been generated.");
   }
 
   const missingPaymentFields = getMissingPaymentFields(refreshed.draft);
@@ -216,7 +222,7 @@ export function summarizeIntake(draft: IntakeDraft): string {
     `Driver license number: ${draft.driverLicenseNumber ?? "missing"}`,
     `VIN: ${draft.vin ?? "missing"}`,
     `Vehicle: ${summarizeVehicle(draft.vehicle)}`,
-    `Mock quote: ${summarizeQuote(draft.quote)}`,
+    `Quote: ${summarizeQuote(draft.quote)}`,
     `Payment: ${summarizePayment(draft.payment)}`,
   ].join("\n");
 }
@@ -264,13 +270,15 @@ function normalizeAndValidate(field: IntakeField, rawValue: unknown): string | n
     return age;
   }
 
+  if (field === "phoneNumber") {
+    return phoneSchema.parse(nanpNormalizePhoneDigits(rawValue));
+  }
+
   const value = z.string().trim().min(1).parse(rawValue);
 
   switch (field) {
     case "email":
       return emailSchema.parse(value).toLowerCase();
-    case "phoneNumber":
-      return phoneSchema.parse(value.replace(/[\s().-]/g, ""));
     case "driverLicenseNumber":
       return value.toUpperCase();
     case "vin":
