@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.env.local
+.envrc
+.env.backup
+.env.old
+*.secret
+.DS_Store
+coverage/
+Observability/
+Geico Data/semantic-index.json
+*.pem
+*-firebase-adminsdk-*.json
+*credentials*.json

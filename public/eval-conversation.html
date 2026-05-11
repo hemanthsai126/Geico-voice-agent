@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Conversation Eval Detail</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a class="brand" href="/">
+        <span class="brand-mark">K</span>
+        <span>KINRO</span>
+      </a>
+      <div class="nav-links">
+        <a href="/evals">Overall Evals</a>
+        <a href="/evals/openai">OpenAI Evals</a>
+        <a href="/conversations">Conversations</a>
+      </div>
+    </nav>
+
+    <main>
+      <section class="card hero-card">
+        <p class="badge">Conversation eval</p>
+        <h1 id="conversationTitle">Conversation Detail</h1>
+        <p id="conversationDescription" class="lede">
+          Deep dive into one conversation's latency, correction, tool, and RAG signals.
+        </p>
+        <div class="actions">
+          <a class="button-link primary" href="/evals">Back to overall evals</a>
+          <a class="button-link" href="/evals/openai">OpenAI evals</a>
+          <a class="button-link" href="/conversations">Open conversations</a>
+        </div>
+      </section>
+
+      <section class="eval-workbench conversation-eval-workbench">
+        <div class="eval-metrics-pane">
+          <section id="conversationSummary" class="eval-summary-grid"></section>
+          <section id="conversationCharts" class="eval-chart-grid"></section>
+          <section id="conversationDetails" class="stack"></section>
+        </div>
+
+        <aside id="conversationReview" class="card eval-conversation-pane eval-conversation-detail">
+          Loading conversation transcript and audio...
+        </aside>
+      </section>
+    </main>
+
+    <script type="module" src="/eval-conversation.js"></script>
+  </body>
+</html>

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lizzy GEICO Quote Agent</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a class="brand" href="/">
+        <span class="brand-mark">K</span>
+        <span>KINRO</span>
+      </a>
+      <div class="nav-links">
+        <a href="/">Call types</a>
+        <a href="/conversations">Conversations</a>
+        <a href="/evals">Evals</a>
+        <a href="/evals/openai">OpenAI Evals</a>
+      </div>
+    </nav>
+
+    <main>
+      <section class="card hero-card">
+        <p class="badge" id="modeLabel">Browser microphone test</p>
+        <h1 id="pageTitle">Lizzy GEICO Quote Agent</h1>
+        <p class="lede" id="pageDescription">
+          Test the mock vehicle insurance quote flow with your built-in microphone.
+        </p>
+
+        <div class="model-picker">
+          <label for="voiceModelSelect">Voice model for this conversation</label>
+          <select id="voiceModelSelect">
+            <option value="openai|gpt-realtime-2">OpenAI · GPT Realtime 2</option>
+          </select>
+          <p id="voiceModelNote" class="status">Model selection is saved with each conversation.</p>
+        </div>
+
+        <div class="actions">
+          <button id="startButton">Start microphone test →</button>
+          <button id="stopButton" disabled>Stop</button>
+          <a class="button-link" href="/">Back to call types</a>
+          <a class="button-link" href="/conversations">View conversations</a>
+          <a class="button-link" href="/evals">View evals</a>
+          <a class="button-link" href="/evals/openai">OpenAI evals</a>
+        </div>
+
+        <p id="status" class="status">Idle</p>
+      </section>
+
+      <section class="grid">
+        <section class="card">
+          <h2>Collected Fields</h2>
+          <dl id="fields"></dl>
+        </section>
+
+        <section class="card">
+          <h2>Vehicle Info</h2>
+          <dl id="vehicle"></dl>
+        </section>
+
+        <section class="card">
+          <h2>Mock Quote</h2>
+          <dl id="quote"></dl>
+        </section>
+
+        <section class="card">
+          <h2>Payment Details</h2>
+          <p class="status">Collected for checkout only. Not saved to Firebase.</p>
+          <dl id="payment"></dl>
+        </section>
+
+        <section class="card">
+          <h2>Event Log</h2>
+          <pre id="log"></pre>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Conversation Observability</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a class="brand" href="/">
+        <span class="brand-mark">K</span>
+        <span>KINRO</span>
+      </a>
+      <div class="nav-links">
+        <a href="/">New call</a>
+        <a href="/evals">Evals</a>
+        <a href="/evals/openai">OpenAI Evals</a>
+      </div>
+    </nav>
+
+    <main>
+      <section class="card hero-card">
+        <p class="badge">Observability</p>
+        <h1>Conversations</h1>
+        <p class="lede">Review saved conversation transcripts, audio, and tool calls. Click a transcript row to play the matching audio track near that timestamp.</p>
+        <div class="actions">
+          <a class="button-link primary" href="/">New call</a>
+          <a class="button-link" href="/evals">View evals</a>
+          <a class="button-link" href="/evals/openai">OpenAI evals</a>
+          <button id="refreshButton">Refresh</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <section class="card">
+          <h2>Saved Conversations</h2>
+          <div id="conversationList" class="stack"></div>
+        </section>
+
+        <section class="card">
+          <h2>Conversation Detail</h2>
+          <div id="conversationDetail" class="stack">Select a conversation.</div>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="/conversations.js"></script>
+  </body>
+</html>

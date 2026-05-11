@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Conversation Evals</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a class="brand" href="/">
+        <span class="brand-mark">K</span>
+        <span>KINRO</span>
+      </a>
+      <div class="nav-links">
+        <a href="/">New call</a>
+        <a href="/conversations">Conversations</a>
+        <a href="/evals/openai">OpenAI Evals</a>
+        <a href="/evals/grok">Grok Evals</a>
+        <a href="/evals/gemini">Gemini Evals</a>
+      </div>
+    </nav>
+
+    <main>
+      <section class="card hero-card">
+        <p class="badge" id="evalProviderBadge">Evaluation dashboard</p>
+        <h1 id="evalPageTitle">Agent Evals</h1>
+        <p class="lede" id="evalPageDescription">
+          Overall production-style dashboard for latency, correction, tool, and RAG quality metrics across saved conversations.
+        </p>
+        <div class="actions">
+          <a class="button-link primary" href="/">New call</a>
+          <a class="button-link" href="/conversations">View conversations</a>
+          <a class="button-link" href="/evals">All evals</a>
+          <a class="button-link" href="/evals/openai">OpenAI</a>
+          <a class="button-link" href="/evals/grok">Grok</a>
+          <a class="button-link" href="/evals/gemini">Gemini</a>
+          <button id="refreshEvalsButton">Refresh</button>
+        </div>
+      </section>
+
+      <section id="evalSummary" class="eval-summary-grid"></section>
+      <section id="evalCharts" class="eval-chart-grid"></section>
+      <section id="evalDetails" class="stack"></section>
+    </main>
+
+    <script type="module" src="/evals.js"></script>
+  </body>
+</html>
