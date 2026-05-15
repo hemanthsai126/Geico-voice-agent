@@ -31,15 +31,31 @@ export function buildConversationEval(conversation) {
   const transcripts = conversation.transcripts ?? [];
   const evals = conversation.evals ?? {};
   const responseLatencies = evals.responseLatencies ?? [];
-  const ragCalls = toolCalls.filter((call) => call.name === "search_auto_insurance_knowledge");
+  const ragCalls = toolCalls.filter((call) => {
+    const n = call.name ?? "";
+    return n === "search_auto_insurance_knowledge" || n.startsWith("search_auto_insurance_knowledge");
+  });
   const ragResults = ragCalls.flatMap((call) => call.output?.results ?? []);
   const ragTopScores = ragCalls.map((call) => Number(call.output?.results?.[0]?.score ?? 0)).filter((score) => score > 0);
   const ragCallScoreStats = ragCalls.map((call, index) => {
-    const scores = (call.output?.results ?? []).map((result) => Number(result.score ?? 0)).filter((score) => score > 0);
+    const rawResults = Array.isArray(call.output?.results) ? call.output.results : [];
+    const documents = rawResults
+      .map((result, ri) => {
+        const sc = Number(result.score ?? 0);
+        if (!Number.isFinite(sc) || sc <= 0) return null;
+        return {
+          rank: ri + 1,
+          score: sc,
+          docLabel: shortenRagDocLabel(ragDocumentGroupKey(result), 72),
+        };
+      })
+      .filter(Boolean);
+    const scores = documents.map((d) => d.score);
     return {
       label: `RAG${index + 1}`,
       timestampMs: call.timestampMs,
       query: call.args?.query,
+      documents,
       scores,
       topScore: max(scores),
       averageScore: average(scores),
@@ -103,6 +119,7 @@ export function buildConversationEval(conversation) {
     ragSourceDiversity: uniqueRagSources.size,
     ragCitationTraceability: ragResults.length > 0 ? traceableRagResults / ragResults.length : undefined,
     transcriptCount: transcripts.length,
+    transcripts,
     toolCallCount: toolCalls.length,
     toolUsageByName: countBy(toolCalls.map((call) => call.name ?? "unknown")),
   };
@@ -421,28 +438,108 @@ export function chartCard(title, description, chart) {
   `;
 }
 
+/**
+ * Compact 0→max bar for a single nonnegative integer (e.g. correction count in transcript evidence).
+ */
+export function simpleIntegerBar(count, options = {}) {
+  const raw = Number(count);
+  const n = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+  const minScale = Number(options.minScale) > 0 ? Number(options.minScale) : 5;
+  let maxTick = Math.max(minScale, n + 3, Math.ceil(Math.max(n, 1) * 1.2));
+  maxTick = Math.max(maxTick, n);
+  const pct = maxTick <= 0 ? 0 : Math.min(100, (n / maxTick) * 100);
+  const caption = options.caption ?? "count";
+  const ariaLabel = options.ariaLabel ?? `${n} ${caption}; scale 0 to ${maxTick}`;
+
+  return `
+    <div class="simple-int-bar" role="img" aria-label="${escapeHtml(ariaLabel)}">
+      <div class="simple-int-bar-value-row">
+        <span class="simple-int-bar-count" aria-hidden="true">${escapeHtml(String(n))}</span>
+        <span class="simple-int-bar-caption">${escapeHtml(caption)}</span>
+      </div>
+      <div class="simple-int-bar-axis" aria-hidden="true">
+        <span>0</span>
+        <span>${escapeHtml(String(maxTick))}</span>
+      </div>
+      <div class="simple-int-bar-track">
+        <div class="simple-int-bar-fill" style="width:${pct}%"></div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * When one sample has a huge latency spike, the Y axis need not swallow the chart.
+ * Outliers clamp to the plotted ceiling visually; dots still carry true values for tooltips.
+ */
+function compressDominantLatencyOutlierCeiling(values) {
+  const positive = [...values].map(Number).filter((n) => Number.isFinite(n) && n >= 0);
+  if (positive.length < 4) return Math.max(...positive, 0);
+  const sorted = [...positive].sort((a, b) => a - b);
+  const qi = (p) => {
+    if (sorted.length === 1) return sorted[0];
+    const u = (p / 100) * (sorted.length - 1);
+    const lo = sorted[Math.floor(u)];
+    const hi = sorted[Math.ceil(u)];
+    const t = u - Math.floor(u);
+    return lo + (hi - lo) * t;
+  };
+  const p88 = qi(88);
+  const p92 = qi(92);
+  const p94 = qi(94);
+  const mx = sorted[sorted.length - 1];
+  if (mx <= p94 * 1.95) return mx;
+  let candidate = Math.min(mx, Math.max(p94 * 2.1 + p88 * 0.25, mx * 0.46));
+  candidate = Math.max(candidate, Math.max(p92 * 1.12, qi(91)));
+  return Math.min(candidate, mx);
+}
+
 export function lineChart(series, evals, formatter, options = {}) {
-  const width = 960;
-  const height = 380;
-  const plotLeft = 72;
-  const plotRightMargin = 28;
-  const plotTop = 22;
-  const plotBottom = height - 32;
-  const plotRight = width - plotRightMargin;
-  const plotWidth = plotRight - plotLeft;
+  const height = Number(options.chartHeightPx) > 0 ? Number(options.chartHeightPx) : 208;
+  const plotLeft = 52;
+  const plotRightMargin = 18;
+  const plotTop = Number(options.plotTopPx) > 0 ? Number(options.plotTopPx) : 11;
+  const chartBottomInset = Number(options.chartBottomInsetPx) > 0 ? Number(options.chartBottomInsetPx) : 20;
+  const plotBottom = Math.max(plotTop + 36, height - chartBottomInset);
+  const slotMinPx = Number(options.slotMinPx) > 0 ? Number(options.slotMinPx) : 42;
+  const seriesLens = Array.isArray(series)
+    ? series.map((s) => (Array.isArray(s?.values) ? s.values.length : 0))
+    : [];
+  const nEvals = Array.isArray(evals) ? evals.length : 0;
+  const n = Math.max(seriesLens.length ? Math.max(...seriesLens) : 0, nEvals, 1);
+
+  const plotWidthFloor =
+    Number.isFinite(Number(options.plotWidthMinPx)) && Number(options.plotWidthMinPx) >= 0
+      ? Number(options.plotWidthMinPx)
+      : 560;
+  /** Minimum plot width for short series; grows per point → horizontal scroll when needed */
+  const plotContentW = Math.max(plotWidthFloor, n * slotMinPx);
+  const plotRight = plotLeft + plotContentW;
+  const width = plotLeft + plotContentW + plotRightMargin;
+
   const plotHeight = plotBottom - plotTop;
 
   const allValues = series.flatMap((item) => item.values).map((value) => Number(value)).filter(Number.isFinite);
-  const rawMax = Math.max(0, ...allValues, 0);
-  const { yMax, ticks } = buildLinearYAxisTicks(rawMax <= 0 ? 1 : rawMax, 4);
+  let rawMax = Math.max(0, ...allValues, 0);
+  if (options.compressLatencyYAxis && allValues.length >= 4 && rawMax > 0) {
+    rawMax = compressDominantLatencyOutlierCeiling(allValues);
+  }
+  const niceMul = Number(options.yAxisNiceMul) > 0 ? Number(options.yAxisNiceMul) : 1.06;
+  const { yMax, ticks } = buildLinearYAxisTicks(rawMax <= 0 ? 1 : rawMax, 4, niceMul);
 
-  const denom = Math.max(evals.length - 1, 1);
+  function xAt(index) {
+    const i = Number(index);
+    if (!Number.isFinite(i)) return plotLeft;
+    if (n <= 1) return plotLeft + plotContentW / 2;
+    return plotLeft + (i / (n - 1)) * plotContentW;
+  }
+
   const lines = series
     .map((item) => {
       const seriesId = slugify(item.label);
       const points = item.values
         .map((value, index) => {
-          const x = plotLeft + (index / denom) * plotWidth;
+          const x = xAt(index);
           const yVal = Number(value);
           const norm = Number.isFinite(yVal) ? Math.min(Math.max(yVal / yMax, 0), 1) : 0;
           const y = plotBottom - norm * plotHeight;
@@ -451,15 +548,15 @@ export function lineChart(series, evals, formatter, options = {}) {
         .join(" ");
       const dots = item.values
         .map((value, index) => {
-          const x = plotLeft + (index / denom) * plotWidth;
+          const x = xAt(index);
           const yVal = Number(value);
           const norm = Number.isFinite(yVal) ? Math.min(Math.max(yVal / yMax, 0), 1) : 0;
           const y = plotBottom - norm * plotHeight;
           const label = shortConversationLabel(evals[index] ?? {});
-          return `<circle class="chart-point" cx="${x}" cy="${y}" r="6" tabindex="0" data-conversation-id="${escapeHtml(evals[index]?.id ?? "")}" data-series="${escapeHtml(seriesId)}" data-label="${escapeHtml(item.label)}" data-point="${escapeHtml(label)}" data-value="${escapeHtml(formatter(value))}"></circle>`;
+          return `<circle class="chart-point" cx="${x}" cy="${y}" r="3" tabindex="0" data-conversation-id="${escapeHtml(evals[index]?.id ?? "")}" data-series="${escapeHtml(seriesId)}" data-label="${escapeHtml(item.label)}" data-point="${escapeHtml(label)}" data-response-latency-index="${index}" data-value="${escapeHtml(formatter(value))}"></circle>`;
         })
         .join("");
-      return `<g class="chart-series" data-series="${escapeHtml(seriesId)}" style="color:${item.color}"><polyline points="${points}" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />${dots}</g>`;
+      return `<g class="chart-series" data-series="${escapeHtml(seriesId)}" style="color:${item.color}"><polyline points="${points}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />${dots}</g>`;
     })
     .join("");
 
@@ -476,60 +573,367 @@ export function lineChart(series, evals, formatter, options = {}) {
   return `
     ${chartLegend(series)}
     <div class="chart-scroll chart-line-scroll">
-      <svg class="eval-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Line chart">
-        ${baselineX(plotLeft, plotRight, plotBottom)}
-        ${horizontalGridAndYTicks}
-        ${lines}
-      </svg>
+      <div class="chart-line-pane" style="width:${width}px">
+        <svg class="eval-chart eval-chart-line" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Line chart">
+          ${baselineX(plotLeft, plotRight, plotBottom)}
+          ${horizontalGridAndYTicks}
+          ${lines}
+        </svg>
+        ${chartXAxis(evals, {
+          slotted: true,
+          insetLeftPx: plotLeft,
+          insetWidthPx: plotContentW,
+          denseSlotThreshold: Number.isFinite(Number(options.denseAxisSlotThreshold))
+            ? Number(options.denseAxisSlotThreshold)
+            : undefined,
+          denseAxisLabels:
+            typeof options.denseAxisLabels === "boolean" ? options.denseAxisLabels : undefined,
+          denseItemLabelFormatter:
+            typeof options.denseItemLabelFormatter === "function" ? options.denseItemLabelFormatter : undefined,
+        })}
+      </div>
     </div>
-    ${chartXAxis(evals)}
     ${chartAxisLabels(options)}
   `;
 }
 
-export function groupedBarChart(series, evals, formatter, options = {}) {
-  const barStackPx = 180;
-  const allValues = series.flatMap((item) => item.values).map((value) => Number(value)).filter(Number.isFinite);
-  const rawMax = Math.max(0, ...allValues, 0);
-  const { yMax, ticks } = buildLinearYAxisTicks(rawMax <= 0 ? 1 : rawMax, 4);
-  const tickLabelsDescending = [...ticks].reverse();
+/** Y-axis ticks for nonnegative integer-ish bin counts displayed as whole numbers. */
+export function buildHistogramCountYAxis(rawMax, segments = 4) {
+  const n = Number(rawMax);
+  const capped = Number.isFinite(n) && n > 0 ? Math.ceil(n) : 1;
+  return buildLinearYAxisTicks(capped, segments);
+}
 
-  const barMarkup = `
-    <div class="bar-chart" style="--bar-count:${Math.max(evals.length, 1)}">
-      ${evals
+/**
+ * Pooled-bin histogram over one or more numeric series (`values` arrays).
+ * Y-axis counts how many samples fall into each bucket.
+ *
+ * Linear bins only: option `linearBinLabelStyle: "midpoint"` shows one short value per column (bin center)
+ * instead of `low–high` spans; the exact interval stays in bar `<title>` and on hover of the axis tick.
+ */
+export function histogramChart(seriesList, formatter, options = {}) {
+  const histogram = computeHistogram(seriesList ?? [], formatter, options);
+  if (!histogram.bins.length) {
+    return `<p class="status">Not enough numeric samples for a histogram.</p>${chartAxisLabels(options)}`;
+  }
+
+  const categories = histogram.bins.map((bin) =>
+    ({
+      chartLabel: bin.label,
+      ...(bin.axisHoverDetail ? { binRangeTitle: bin.axisHoverDetail } : {}),
+    }),
+  );
+  const countSeries = (seriesList ?? []).map((item, si) => ({
+    label: item.label,
+    values: histogram.countMatrix[si] ?? histogram.bins.map(() => 0),
+    color: item.color ?? "#5a8aaa",
+  }));
+
+  return svgGroupedBarChart(countSeries, categories, axisCountFormatter, {
+    ...options,
+    numericCategoryWidth: Math.max(Number(options.slotMinPx ?? options.minSlotPx ?? 80), Math.round(560 / histogram.bins.length)),
+    ariaLabel: options.ariaLabel ?? "Histogram chart",
+    yFormatterOverride: axisCountFormatter,
+  });
+}
+
+/**
+ * Stack unrelated histograms vertically. Each panel gets its own bucket edges (avoid pooling
+ * different units or scales into one shared histogram, which misleads readers).
+ *
+ * @param {Array<{title: string, body: string}>} panels
+ */
+export function stackedHistogramPanels(panels) {
+  const list = Array.isArray(panels) ? panels : [];
+  if (list.length === 0) return "";
+  return `
+    <div class="eval-histogram-stack">
+      ${list
         .map(
-          (item, index) => `
-            <div class="bar-group">
-              <div class="bar-stack">
-                ${series
-                  .map((entry) => {
-                    const value = Number(entry.values[index] ?? 0);
-                    const fraction = value > 0 ? Math.min(value / yMax, 1) : 0;
-                    const pxHeight = fraction > 0 ? Math.max(4, fraction * barStackPx) : 0;
-                    return `
-                      <span class="bar" data-series="${escapeHtml(slugify(entry.label))}" style="height:${pxHeight}px; --bar-height:${fraction * 100}%; --bar-color:${entry.color}">
-                        <strong>${escapeHtml(formatter(value))}</strong>
-                      </span>
-                    `;
-                  })
-                  .join("")}
-              </div>
-              <span class="bar-label">${escapeHtml(shortConversationLabel(item))}</span>
-            </div>
-          `,
+          (p) => `
+        <section class="eval-histogram-pane">
+          <h3 class="eval-histogram-pane-title">${escapeHtml(p.title)}</h3>
+          ${p.body}
+        </section>`,
         )
         .join("")}
     </div>
   `;
+}
+
+function axisCountFormatter(value) {
+  const n = Math.round(Number(value));
+  return Number.isFinite(n) ? String(n) : "0";
+}
+
+function computeHistogram(seriesList, formatter, options) {
+  const series = (seriesList ?? []).filter((s) => s && Array.isArray(s.values));
+  if (series.length === 0) return { bins: [], countMatrix: [] };
+
+  const pooled = series.flatMap((s) => s.values.map((v) => Number(v)).filter((n) => Number.isFinite(n)));
+  if (pooled.length === 0) return { bins: [], countMatrix: [] };
+
+  const wantsInteger =
+    options.binMode === "integer" ||
+    (options.binMode !== "linear" &&
+      pooled.every((n) => Number.isFinite(n) && Number.isInteger(n) && n >= 0) &&
+      Math.max(...pooled, 0) <= Number(options.integerMaxAuto ?? 64));
+
+  const bins = wantsInteger ? buildIntegerCountBins(pooled, options) : buildLinearBins(pooled, formatter, options);
+  const countMatrix = series.map((s) => bins.map((bin) => countInBin(s.values, bin)));
+
+  return { bins, countMatrix };
+}
+
+function countInBin(values, bin) {
+  return values.filter((value) => valueInBin(Number(value), bin)).length;
+}
+
+function valueInBin(value, bin) {
+  if (!Number.isFinite(value)) return false;
+  if (bin.kind === "integer") return value >= bin.low && value <= bin.high;
+  if (value < bin.low) return false;
+  if (bin.inclusiveRightEdge) return value <= bin.high;
+  return value < bin.high;
+}
+
+function buildIntegerCountBins(values, options) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  const maxObserved = nums.length === 0 ? 0 : Math.max(0, ...nums);
+  const cap = Number(options.integerCap ?? 18);
+  const upper = Math.min(Math.ceil(maxObserved), cap);
+
+  /** @type {Array<{kind:'integer'; low:number; high:number; label:string}>} */
+  const bins = [];
+
+  let v = 0;
+  while (v <= upper) {
+    bins.push({
+      kind: "integer",
+      low: v,
+      high: v,
+      label: String(v),
+    });
+    if (bins.length >= 36) break;
+    v++;
+  }
+
+  if (maxObserved > upper) {
+    bins.push({
+      kind: "integer",
+      low: upper + 1,
+      high: Infinity,
+      label: `${upper + 1}+`,
+    });
+  }
+
+  return bins;
+}
+
+function buildLinearBins(pooled, formatter, options) {
+  let minVal = Math.min(...pooled);
+  let maxVal = Math.max(...pooled);
+
+  if (!Number.isFinite(minVal)) minVal = 0;
+  if (!Number.isFinite(maxVal)) maxVal = 1;
+
+  let spread = maxVal - minVal;
+  if (spread <= 0) {
+    const pad =
+      Math.max(Math.abs(minVal) * 0.002, minVal !== 0 ? Math.abs(minVal) * 0.002 : Math.abs(maxVal) * 0.002 || 0.001) ||
+      0.001;
+    const center = minVal !== 0 ? minVal : maxVal !== 0 ? maxVal : 1;
+
+    const labelCenter = formatter(center);
+    const labelStyle = options.linearBinLabelStyle ?? "range";
+    /** @type {Array<{kind:'linear'; low:number; high:number; inclusiveRightEdge:boolean; label:string; axisHoverDetail?:string}>} */
+    return [
+      {
+        kind: "linear",
+        low: center - pad,
+        high: center + pad,
+        inclusiveRightEdge: true,
+        label: labelCenter,
+        ...(labelStyle === "midpoint"
+          ? { axisHoverDetail: `${formatter(center - pad)}\u2009\u2013\u2009${formatter(center + pad)}` }
+          : {}),
+      },
+    ];
+  }
+
+  let binCount = Number(options.binCount);
+  if (!Number.isFinite(binCount) || binCount < 3) binCount = 11;
+  binCount = Math.min(Math.max(binCount, 4), 24);
+
+  const edges = [];
+
+  let iEdge = 0;
+  while (iEdge <= binCount) {
+
+    edges.push(minVal + (spread * iEdge) / binCount);
+
+    iEdge++;
+  }
+
+  /** @type {Array<{kind:'linear'; low:number; high:number; inclusiveRightEdge:boolean; label:string; axisHoverDetail?:string}>} */
+  const bins = [];
+
+  /** @type {Set<string>} */
+  const labelsSeen = new Set();
+
+  const labelStyle = options.linearBinLabelStyle ?? "range";
+
+
+  let b = 0;
+  while (b < binCount) {
+    const low = edges[b];
+    const high = edges[b + 1];
+    const rangeLabel = `${formatter(low)}\u2009\u2013\u2009${formatter(high)}`;
+    let label = rangeLabel;
+    if (labelStyle === "midpoint") {
+      const mid = (low + high) / 2;
+      label = formatter(mid);
+    }
+
+    while (labelsSeen.has(label)) {
+      label += ` ·${b}`;
+    }
+
+    labelsSeen.add(label);
+
+    const isLast = b === binCount - 1;
+
+    bins.push({
+      kind: "linear",
+      low,
+      high: isLast ? Math.max(high, maxVal) : high,
+      inclusiveRightEdge: isLast,
+      label,
+      ...(labelStyle === "midpoint" ? { axisHoverDetail: rangeLabel } : {}),
+    });
+
+    b++;
+  }
+
+  return bins;
+}
+
+export function groupedBarChart(series, evals, formatter, options = {}) {
+  return svgGroupedBarChart(series, evals ?? [], formatter, options);
+}
+
+function svgGroupedBarChart(series, categories, formatter, options = {}) {
+  const height = Number(options.chartHeightPx) > 0 ? Number(options.chartHeightPx) : 218;
+  const plotLeft = 48;
+  const plotRightMargin = 18;
+  const plotTop = 11;
+  const plotBottom = height - 21;
+  const plotWidthDefault = 560 - plotLeft - plotRightMargin;
+  /** When set (e.g. conversation eval column), clamps bar-plot horizontal span; aligns with lineChart plotWidthMinPx intent */
+  const plotWidthBaseRaw =
+    Number.isFinite(Number(options.plotWidthMinPx)) && Number(options.plotWidthMinPx) >= 0
+      ? Number(options.plotWidthMinPx)
+      : plotWidthDefault;
+  const plotWidthBase = Math.max(160, Math.min(plotWidthBaseRaw, 960));
+
+  const cats = categories ?? [];
+  const nCat = Math.max(cats.length, 1);
+  const seriesList = Array.isArray(series) ? series.filter((s) => s && Array.isArray(s.values)) : [];
+  const nSer = Math.max(seriesList.length, 1);
+
+  const numericValues = seriesList.flatMap((item) => item.values.map((value) => Number(value ?? 0))).filter((value) => Number.isFinite(value));
+  const rawMax = Math.max(0, ...numericValues, 0);
+
+  const yTickFormatter = typeof options.yFormatterOverride === "function" ? options.yFormatterOverride : formatter;
+
+  const useCountY = options.yFormatterOverride === axisCountFormatter;
+
+  const axis = useCountY ? buildHistogramCountYAxis(rawMax, 4) : buildLinearYAxisTicks(rawMax <= 0 ? 1 : rawMax, 4);
+  const yMax = axis.yMax;
+  const ticks = axis.ticks;
+
+  const slotMin = Number(options.numericCategoryWidth ?? options.minSlotPx ?? options.slotMinPx ?? 44);
+  const slotW = Math.max(slotMin, plotWidthBase / nCat);
+  const plotContentW = slotW * nCat;
+  const width = plotLeft + plotContentW + plotRightMargin;
+  const plotRight = width - plotRightMargin;
+  const plotHeight = plotBottom - plotTop;
+
+  const innerPad = 6;
+  const groupUsable = Math.max(8, slotW - innerPad * 2);
+  const band = groupUsable / nSer;
+  const barGap = band * 0.1;
+  const barW = Math.max(2, band - barGap);
+  const packedW = (nSer - 1) * band + barW;
+
+  const bars = cats
+    .map((cat, colIndex) =>
+      seriesList
+        .map((entry, si) => {
+          const value = Number(entry.values[colIndex] ?? 0);
+          const seriesId = slugify(entry.label);
+          const frac = yMax > 0 && Number.isFinite(value) ? Math.min(Math.max(value / yMax, 0), 1) : 0;
+          const h = frac * plotHeight;
+          /** Center the bar cluster on the slot midpoint (matches slotted axis grid). */
+          const slotMidX = plotLeft + colIndex * slotW + slotW / 2;
+          const x0 = slotMidX - barGap / 2 - packedW / 2;
+          const x = x0 + si * band + barGap / 2;
+          const yRect = plotBottom - h;
+          const titlePlain = `${entry.label}: ${yTickFormatter(value)} · ${shortConversationLabel(cat)}${
+            cat?.binRangeTitle ? `\n${cat.binRangeTitle}` : ""
+          }`;
+          const convRaw = cat?.id != null ? String(cat.id).trim() : "";
+          const convAttr = convRaw ? ` data-conversation-id="${escapeHtml(convRaw)}"` : "";
+
+          return `
+            <rect class="chart-bar-rect" tabindex="0"
+              x="${x}" y="${yRect}" width="${barW}" height="${Math.max(h, 0)}"
+              rx="2" ry="2" fill="${escapeHtml(entry.color)}" style="color:${entry.color}"
+              data-series="${escapeHtml(seriesId)}"${convAttr}
+              data-label="${escapeHtml(entry.label)}"
+              data-point="${escapeHtml(shortConversationLabel(cat))}"
+              data-value="${escapeHtml(yTickFormatter(value))}"
+            >
+              <title>${escapeHtml(titlePlain)}</title>
+            </rect>
+          `;
+        })
+        .join(""),
+    )
+    .join("");
+
+  const grid = renderHorizontalGridAndYTicks({
+    plotLeft,
+    plotRight,
+    plotTop,
+    plotBottom,
+    yMax,
+    ticks,
+    formatter: yTickFormatter,
+  });
 
   return `
-    ${chartLegend(series)}
-    <div class="chart-scroll">
-      <div class="bar-chart-shell">
-        <div class="bar-y-scale" aria-hidden="true">
-          ${tickLabelsDescending.map((t) => `<span>${escapeHtml(axisTickFormatter(formatter, t))}</span>`).join("")}
-        </div>
-        <div class="bar-chart-canvas">${barMarkup}</div>
+    ${options.omitChartLegend ? "" : chartLegend(seriesList)}
+    <div class="chart-scroll chart-chart-bar-scroll">
+      <div
+        class="chart-bar-pane"
+        style="
+          flex: 0 0 auto;
+          width:${width}px;
+          --chart-slots:${cats.length || 1}
+        ">
+        <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"
+          class="eval-chart eval-chart-grouped" role="img" aria-label="${escapeHtml(options.ariaLabel ?? "Grouped bar chart")}">
+          ${baselineX(plotLeft, plotRight, plotBottom)}
+          ${grid}
+          ${bars}
+        </svg>
+        ${chartXAxis(cats, {
+          slotted: true,
+          insetLeftPx: plotLeft,
+          insetWidthPx: plotContentW,
+          categoryRangeHints: cats.some((c) => Boolean(c?.binRangeTitle)),
+        })}
       </div>
     </div>
     ${chartAxisLabels(options)}
@@ -552,8 +956,9 @@ function renderHorizontalGridAndYTicks({ plotLeft, plotRight, plotTop, plotBotto
     .join("");
 }
 
-function buildLinearYAxisTicks(rawMax, segments = 4) {
-  const yMax = rawMax <= 0 ? 1 : niceUpperBound(rawMax * 1.06);
+function buildLinearYAxisTicks(rawMax, segments = 4, niceMul = 1.06) {
+  const mul = Number(niceMul) > 0 ? Number(niceMul) : 1.06;
+  const yMax = rawMax <= 0 ? 1 : niceUpperBound(rawMax * mul);
   const ticks = [];
   for (let i = 0; i <= segments; i++) ticks.push((yMax * i) / segments);
   return { yMax, ticks };
@@ -587,6 +992,22 @@ function chartLegend(series) {
   `;
 }
 
+function trimConversationIdFromElement(el) {
+  const raw = el?.dataset?.conversationId;
+  if (raw === undefined || raw === null) return "";
+  const s = String(raw).trim();
+  return s;
+}
+
+/** When opening a conversation from dashboard charts, jump to QA when plot is corrections/failures-centric. */
+function evalChartNavigationHash(target) {
+  const cardTitle = (target.closest(".chart-card")?.querySelector("h2")?.textContent ?? "").toLowerCase();
+  const series = (target.dataset.label ?? "").toLowerCase();
+  if (cardTitle.includes("correction") || cardTitle.includes("failure")) return "#quality-events";
+  if (series.includes("correction") || series.includes("failure")) return "#quality-events";
+  return "";
+}
+
 export function attachChartInteractions(root = document) {
   root.querySelectorAll("[data-chart-series-toggle]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -611,11 +1032,40 @@ export function attachChartInteractions(root = document) {
     point.addEventListener("click", (event) => {
       showChartTooltip(event, tooltip);
       tooltip.classList.toggle("pinned");
-      const conversationId = point.dataset.conversationId;
-      const label = point.dataset.label ?? "";
-      if (conversationId && /correction|failure/i.test(label)) {
-        window.location.href = `/evals/conversation?id=${encodeURIComponent(conversationId)}#quality-events`;
+
+      /** Per-turn latency chart: delegated handler elsewhere scrolls the transcript instead of navigating. */
+      if (point.closest("[data-latency-turn-chart]")) {
+        return;
       }
+
+      const conversationId = trimConversationIdFromElement(point);
+      if (!conversationId) return;
+
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+        window.open(`/evals/conversation?id=${encodeURIComponent(conversationId)}${evalChartNavigationHash(point)}`, "_blank");
+        return;
+      }
+
+      window.location.href = `/evals/conversation?id=${encodeURIComponent(conversationId)}${evalChartNavigationHash(point)}`;
+    });
+  });
+
+  root.querySelectorAll(".chart-bar-rect").forEach((rect) => {
+    rect.addEventListener("pointerenter", (event) => showChartTooltip(event, tooltip));
+    rect.addEventListener("pointermove", (event) => positionChartTooltip(event, tooltip));
+    rect.addEventListener("pointerleave", () => hideChartTooltip(tooltip));
+    rect.addEventListener("focus", (event) => showChartTooltip(event, tooltip));
+    rect.addEventListener("blur", () => hideChartTooltip(tooltip));
+    rect.addEventListener("click", (event) => {
+      const conversationId = trimConversationIdFromElement(rect);
+      if (!conversationId) return;
+
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+        window.open(`/evals/conversation?id=${encodeURIComponent(conversationId)}${evalChartNavigationHash(rect)}`, "_blank");
+        return;
+      }
+
+      window.location.href = `/evals/conversation?id=${encodeURIComponent(conversationId)}${evalChartNavigationHash(rect)}`;
     });
   });
 }
@@ -660,20 +1110,67 @@ function slugify(value) {
   return String(value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-function chartXAxis(evals) {
+function chartXAxis(evals, axisOptions = {}) {
+  const list = evals ?? [];
+  const slots = Math.max(list.length, 1);
+  const thresh = axisOptions.denseSlotThreshold;
+  const denseThreshold = Number.isFinite(Number(thresh)) && Number(thresh) > 0 ? Number(thresh) : 16;
+  const denseDefault = slots >= denseThreshold;
+  const denseFormatter = typeof axisOptions.denseItemLabelFormatter === "function";
+  const denseExplicit = typeof axisOptions.denseAxisLabels === "boolean" ? axisOptions.denseAxisLabels : undefined;
+  const dense = denseExplicit === undefined ? denseDefault || denseFormatter : denseExplicit;
+
+  let cls = axisOptions.slotted ? "chart-x-axis chart-x-axis-slotted" : "chart-x-axis";
+  if (axisOptions.slotted && dense) cls += " chart-x-axis-dense";
+  if (axisOptions.categoryRangeHints) cls += " chart-x-axis-compactBins";
+
+  const labels =
+    list
+      .map((item, index) => {
+        const denseFormat = dense && denseFormatter;
+        const displayPlain = denseFormat ? axisOptions.denseItemLabelFormatter(item, index) : shortConversationLabel(item);
+        let titleRaw = "";
+        if (typeof item.binRangeTitle === "string" && item.binRangeTitle.trim()) {
+          titleRaw = item.binRangeTitle.trim();
+        } else if (denseFormat) {
+          titleRaw =
+            typeof item.axisDenseTitle === "string" && item.axisDenseTitle.trim()
+              ? item.axisDenseTitle.trim()
+              : shortConversationLabel(item);
+        }
+        const text = escapeHtml(displayPlain);
+        const tipAttr = titleRaw.trim() ? ` title="${escapeHtml(titleRaw.trim())}"` : "";
+        return `<span${tipAttr}>${text}</span>`;
+      })
+      .join("") || `<span>n/a</span>`;
+
+  const innerAttrs = axisOptions.slotted ? ` style="--chart-slots:${slots};width:100%"` : "";
+  let row = `<div class="${cls}"${innerAttrs}>${labels}</div>`;
+
+  if (
+    axisOptions.slotted &&
+    typeof axisOptions.insetLeftPx === "number" &&
+    typeof axisOptions.insetWidthPx === "number"
+  ) {
+    const wrapStyle = `flex:0 0 auto;margin-left:${axisOptions.insetLeftPx}px;width:${Math.max(axisOptions.insetWidthPx, 88)}px;`;
+    row = `<div class="chart-x-axis-strip" style="${wrapStyle}">${row}</div>`;
+  }
+
   return `
-    <div class="chart-x-axis">
-      ${evals.map((item) => `<span>${escapeHtml(shortConversationLabel(item))}</span>`).join("")}
-    </div>
+    ${row}
   `;
 }
 
 function chartAxisLabels(options) {
   if (!options.xLabel && !options.yLabel) return "";
+  const stacked = options.chartAxisLegendStack === true;
+  const cls = stacked ? "chart-axis-labels chart-axis-labels-stack" : "chart-axis-labels";
+  const yEsc = escapeHtml(options.yLabel ?? "value");
+  const xEsc = escapeHtml(options.xLabel ?? "items");
   return `
-    <div class="chart-axis-labels">
-      <span>Y-axis: ${escapeHtml(options.yLabel ?? "value")}</span>
-      <span>X-axis: ${escapeHtml(options.xLabel ?? "items")}</span>
+    <div class="${cls}">
+      ${options.yLabel ? `<span class="chart-axis-y-legend">${yEsc}</span>` : ``}
+      ${options.xLabel ? `<span class="chart-axis-x-legend">${xEsc}</span>` : ``}
     </div>
   `;
 }
@@ -819,8 +1316,23 @@ export function formatOffset(ms) {
 }
 
 export function shortConversationLabel(item) {
-  if (item?.listOrdinal != null && Number.isFinite(item.listOrdinal)) return String(item.listOrdinal);
-  return item.chartLabel ?? item.displayId ?? shortId(item.id) ?? "Call";
+  if (!item || typeof item !== "object") return "Call";
+
+  let extra = "";
+  if (typeof item.label === "string" && item.label.trim()) {
+    const trimmed = item.label.trim();
+    const chart = item.chartLabel != null ? String(item.chartLabel).trim() : "";
+    if (trimmed !== chart && trimmed !== String(item.listOrdinal ?? "").trim()) {
+      extra = ` (${trimmed})`;
+    }
+  }
+
+  if (item.listOrdinal != null && Number.isFinite(Number(item.listOrdinal))) {
+    return String(item.listOrdinal) + extra;
+  }
+
+  const base = item.chartLabel ?? item.displayId ?? shortId(item.id) ?? "Call";
+  return base + extra;
 }
 
 function shortId(id) {

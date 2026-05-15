@@ -10,10 +10,12 @@ import {
   formatOffset,
   formatScore,
   groupedBarChart,
+  histogramChart,
   lineChart,
   loadConversationEvals,
   metricCard,
   metricHelp,
+  stackedHistogramPanels,
   summarizeToolArgs,
 } from "./evalMetrics.js";
 
@@ -141,28 +143,64 @@ function renderCharts(evals) {
       ),
     ),
     chartCard(
-      "Tool Runtime vs RAG Runtime",
-      "Compares all tool calls with the semantic retrieval calls.",
-      lineChart(
-        [
-          {
-            label: "Tool runtime",
-            values: evals.map((item) => item.avgToolDurationMs),
-            color: "#87afc7",
-          },
-          {
-            label: "RAG runtime",
-            values: evals.map((item) => item.ragLatencyMs),
-            color: "#1e2030",
-          },
-        ],
-        evals,
-        formatMs,
+      "Tool vs RAG latency per conversation",
+      "Two stacked histograms: each builds its buckets from only one metric, so milliseconds on the horizontal axis mean something different above vs below. Bar height remains how many saved conversations fall in each latency slice. This avoids mixing unlike distributions into shared bins—or reading two drifting line charts like a paired time series.",
+      stackedHistogramPanels([
         {
-          xLabel: "Conversation number (oldest→newest)",
-          yLabel: "Runtime in milliseconds/seconds",
+          title: "Average tool wall time",
+          body: histogramChart(
+            [
+              {
+                label: "Conversations",
+                values: evals.map((item) => Number(item.avgToolDurationMs ?? 0)),
+                color: "#87afc7",
+              },
+            ],
+            formatMs,
+            {
+              binMode: "linear",
+              binCount: 8,
+              linearBinLabelStyle: "midpoint",
+              slotMinPx: 44,
+              chartHeightPx: 200,
+              omitChartLegend: true,
+              chartAxisLegendStack: true,
+              denseAxisLabels: false,
+              ariaLabel: "Histogram of per-conversation average tool wall time",
+              xLabel:
+                "Equal-width bins across the slow→fast spread in this metric. Ticks mark each bin midpoint; hover a tick or bar for the exact millisecond span.",
+              yLabel: "Conversation count per bin",
+            },
+          ),
         },
-      ),
+        {
+          title: "Average RAG retrieval latency",
+          body: histogramChart(
+            [
+              {
+                label: "Conversations",
+                values: evals.map((item) => Number(item.ragLatencyMs ?? 0)),
+                color: "#1e2030",
+              },
+            ],
+            formatMs,
+            {
+              binMode: "linear",
+              binCount: 8,
+              linearBinLabelStyle: "midpoint",
+              slotMinPx: 44,
+              chartHeightPx: 200,
+              omitChartLegend: true,
+              chartAxisLegendStack: true,
+              denseAxisLabels: false,
+              ariaLabel: "Histogram of per-conversation average RAG retrieval latency",
+              xLabel:
+                "Equal-width bins across the slow→fast spread in this metric. Ticks mark each bin midpoint; hover a tick or bar for the exact millisecond span.",
+              yLabel: "Conversation count per bin",
+            },
+          ),
+        },
+      ]),
     ),
     chartCard(
       "Corrections Per Conversation",
@@ -178,56 +216,39 @@ function renderCharts(evals) {
         evals,
         String,
         {
+          numericCategoryWidth: Math.max(40, Math.round(480 / Math.max(evals.length, 1))),
           xLabel: "Conversation number (oldest→newest)",
           yLabel: "Correction count",
         },
       ),
     ),
     chartCard(
-      "Tool Calls Used Per Conversation",
-      "Shows total tool calls and tool failures for each conversation.",
-      lineChart(
-        [
-          {
-            label: "Tool calls",
-            values: evals.map((item) => item.toolCallCount),
-            color: "#5a8aaa",
-          },
-          {
-            label: "Tool failures",
-            values: evals.map((item) => item.silentFailureCount),
-            color: "#111827",
-          },
-        ],
-        evals,
-        String,
-        {
-          xLabel: "Conversation number (oldest→newest)",
-          yLabel: "Tool call count",
-        },
-      ),
-    ),
-    chartCard(
-      "RAG Retrieval Quality",
-      "Tracks semantic match strength and average result score per conversation.",
-      lineChart(
+      "RAG Retrieval Quality Distribution",
+      "Histogram of best cosine match and conversation-level average cosine across returned chunks. Helps spot tight clusters versus long tails. Buckets aggregate many conversations, so bar clicks cannot open one call — use Response Latency Over Time (click a dot) or Corrections Per Conversation (click a bar) instead.",
+      histogramChart(
         [
           {
             label: "Best match score",
-            values: evals.map((item) => item.ragTopScore),
+            values: evals.map((item) => Number(item.ragTopScore ?? 0)),
             color: "#5a8aaa",
           },
           {
-            label: "Average result score",
-            values: evals.map((item) => item.ragAverageResultScore),
+            label: "Average chunk score",
+            values: evals.map((item) => Number(item.ragAverageResultScore ?? 0)),
             color: "#87afc7",
           },
         ],
-        evals,
         formatScore,
         {
-          xLabel: "Conversation number (oldest→newest)",
-          yLabel: "Cosine similarity score",
+          binMode: "linear",
+          binCount: 10,
+          linearBinLabelStyle: "midpoint",
+          slotMinPx: 46,
+          denseAxisLabels: false,
+          chartAxisLegendStack: true,
+          xLabel:
+            "Pooled similarity samples for both series. Ticks are bin midpoints; hover a tick or bar for the exact score interval.",
+          yLabel: "Conversation count per bin",
         },
       ),
     ),
@@ -244,19 +265,21 @@ function renderEvalDetailSections(evals) {
 
 function renderToolFailureLogSection(failureRows) {
   const headline = `${failureRows.length} failure${failureRows.length === 1 ? "" : "s"} across saved conversations`;
+  const intro =
+    failureRows.length === 0
+      ? `This list only shows tool runs that returned <code class="metric-code-snippet">output.ok === false</code>. Nothing in the conversations you’re viewing matched that—you can still open any call below to review transcripts, audio, and tool payloads in its scorecard.`
+      : `Rows are tool executions where <code class="metric-code-snippet">output.ok === false</code> (${escapeHtml(headline)}). Open a conversation’s eval detail for transcripts, audio cues, and full tool payloads next to each failure.`;
+
   return `
     <section class="card" id="eval-tool-failure-log">
       <div class="dashboard-section-header">
         <p class="badge">Tool diagnostics</p>
         <h2>Tool Failure Log</h2>
-        <p>
-          Rows are tool executions where <code class="metric-code-snippet">output.ok === false</code>${failureRows.length ? ` (${escapeHtml(headline)})` : ''}.
-          Open a conversation’s eval detail for transcripts, audio cues, and full tool payloads next to failures.
-        </p>
+        <p>${intro}</p>
       </div>
       ${
         failureRows.length === 0
-          ? `<p class="status">No tool failures in this view.</p>`
+          ? `<p class="status"><strong>All clear.</strong> No failures matched this dashboard filter.</p>`
           : `<div class="eval-failure-log-scroll">${failureRows.map(renderToolFailureRow).join("")}</div>`
       }
     </section>

@@ -11,6 +11,8 @@
   --glass-bg: rgb(255 255 255 / 72%);
   --glass-border: rgb(255 255 255 / 82%);
   --shadow: 0 24px 70px rgb(17 24 39 / 10%), 0 2px 10px rgb(17 24 39 / 6%);
+  /** ~75% of prior clamp(16px, 4vw, 64px) gutters — less dead space left/right */
+  --page-gutter-x: clamp(12px, 3vw, 48px);
   color-scheme: light;
   font-family:
     Inter, "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -34,8 +36,20 @@ body {
 main {
   margin: 0 auto;
   max-width: none;
-  padding: 40px clamp(16px, 4vw, 64px) 64px;
+  padding: 40px var(--page-gutter-x) 64px;
   width: 100%;
+}
+
+/**
+ * Conversation eval: no max-width rail (was min(1680px,96vw)—huge gutters on ultrawide);
+ * gutters here ~¼ of root so charts use horizontal space without crowding the transcript column.
+ */
+body.page-conversation-eval {
+  --page-gutter-x: clamp(3px, 0.75vw, 12px);
+}
+
+.page-conversation-eval main {
+  max-width: none;
 }
 
 .top-nav {
@@ -46,7 +60,7 @@ main {
   display: flex;
   height: 58px;
   justify-content: space-between;
-  padding: 0 clamp(16px, 4vw, 64px);
+  padding: 0 var(--page-gutter-x);
   position: sticky;
   top: 0;
   z-index: 100;
@@ -128,6 +142,10 @@ main {
   line-height: 1.6;
   margin: 22px 0 0;
   max-width: 680px;
+}
+
+.page-conversation-eval .lede {
+  max-width: none;
 }
 
 .model-picker {
@@ -220,7 +238,7 @@ main {
   border: 1px solid var(--border);
   border-radius: 28px;
   box-shadow: var(--shadow);
-  padding: clamp(20px, 3vw, 30px);
+  padding: clamp(20px, 3vw, 30px) clamp(15px, 2.25vw, 22px);
 }
 
 .hero-card {
@@ -381,6 +399,31 @@ pre {
   gap: 8px;
 }
 
+.latency-combo-intro {
+  min-width: 0;
+}
+
+.latency-chart-hint {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 0 0 10px;
+}
+
+.transcript-group.latency-turn-highlight {
+  background: rgb(90 138 170 / 16%);
+  border-radius: 20px;
+  box-shadow:
+    inset 0 0 0 1px rgb(90 138 170 / 25%),
+    0 0 0 3px rgb(90 138 170 / 32%);
+  outline: none;
+  padding-block: 4px;
+  transition:
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
 .list-item.selected {
   border-color: var(--brand);
   box-shadow: 0 0 0 4px rgb(135 175 199 / 18%);
@@ -514,6 +557,7 @@ audio {
   font-size: 0.92rem;
 }
 
+.latency-combo-charts {
   display: grid;
   gap: 28px;
   margin-top: 16px;
@@ -537,6 +581,7 @@ audio {
 }
 
 .eval-chart-grid {
+  align-items: start;
   display: grid;
   gap: 24px;
   grid-template-columns: 1fr;
@@ -557,16 +602,58 @@ audio {
   margin-top: 20px;
 }
 
+.conversation-eval-workbench {
+  column-gap: clamp(20px, 2.8vw, 36px);
+  grid-template-columns: minmax(0, 13fr) minmax(280px, 7fr);
+  isolation: isolate;
+}
+
+.conversation-eval-workbench .eval-metrics-pane {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.conversation-eval-workbench .eval-metrics-pane > .chart-card {
+  box-sizing: border-box;
+  min-width: min(100%, 520px);
+  width: 100%;
+}
+
+.conversation-eval-workbench .chart-card.chart-card-latency-combo,
+.conversation-eval-workbench .latency-combo-intro {
+  overflow: visible;
+}
+
+.conversation-eval-workbench .latency-combo-intro {
+  max-width: 100%;
+}
+
+.conversation-eval-workbench .latency-combo-intro p {
+  overflow-wrap: anywhere;
+}
+
+.chart-card-latency-combo .chart-x-axis.chart-x-axis-slotted span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .conversation-eval-workbench .eval-conversation-pane {
+  background: rgb(255 255 255 / 96%);
   max-height: calc(100vh - 72px);
 }
 
-@media (max-width: 1000px) {
+@media (max-width: 860px) {
   .conversation-eval-workbench {
     grid-template-columns: 1fr;
   }
 
+  .conversation-eval-workbench .eval-metrics-pane {
+    overflow-x: visible;
+  }
+
   .conversation-eval-workbench .eval-conversation-pane {
+    background: transparent;
     max-height: none;
     position: static;
   }
@@ -1084,10 +1171,12 @@ audio {
 }
 
 .quality-event-card {
+  align-items: flex-start;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: 18px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 14px;
 }
@@ -1097,10 +1186,27 @@ audio {
   display: flex;
   gap: 12px;
   justify-content: space-between;
+  width: 100%;
 }
 
-.quality-event-card p {
+.quality-event-card > p {
   margin: 0;
+  width: 100%;
+}
+
+.quality-event-card pre.tool-payload {
+  align-self: stretch;
+  margin: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.quality-event-card .button-link {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  font-weight: 800;
+  margin-top: 2px;
+  padding: 6px 12px;
 }
 
 .tool-failure-card {
@@ -1108,10 +1214,17 @@ audio {
 }
 
 .chart-card {
+  align-items: start;
   display: grid;
-  gap: 20px;
-  overflow: hidden;
-  padding: clamp(24px, 4vw, 40px);
+  gap: 16px;
+  overflow: visible;
+  padding: clamp(18px, 3.2vw, 30px) clamp(14px, 2.6vw, 22px);
+}
+
+.chart-scroll,
+.chart-chart-bar-scroll,
+.chart-line-scroll {
+  min-width: 0;
 }
 
 .chart-card h2 {
@@ -1120,6 +1233,12 @@ audio {
 
 .chart-card p {
   margin: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.chart-card-latency-combo .latency-chart-hint {
+  line-height: 1.45;
 }
 
 .chart-legend {
@@ -1157,11 +1276,291 @@ audio {
   overflow-x: auto;
 }
 
+.eval-histogram-stack {
+  display: grid;
+  gap: clamp(22px, 4vw, 34px);
+  min-width: 0;
+}
+
+.eval-histogram-pane {
+  margin: 0;
+  min-width: 0;
+}
+
+.eval-histogram-pane-title {
+  color: var(--ink);
+  font-size: 0.93rem;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  margin: 0 0 8px;
+}
+
 .eval-chart {
   display: block;
-  min-height: 360px;
+  min-height: 0;
   min-width: 0;
+}
+
+.eval-chart-grouped rect.chart-bar-rect[data-conversation-id] {
+  cursor: pointer;
+  outline: none;
+  transition:
+    opacity 0.16s ease,
+    filter 0.16s ease;
+}
+
+.eval-chart-grouped rect.chart-bar-rect:not([data-conversation-id]) {
+  cursor: default;
+}
+
+.eval-chart-grouped rect.chart-bar-rect[data-conversation-id]:hover,
+.eval-chart-grouped rect.chart-bar-rect[data-conversation-id]:focus-visible {
+  filter: brightness(1.05);
+}
+
+.eval-chart-grouped rect.chart-bar-rect.hidden-series,
+.chart-point.hidden-series {
+  opacity: 0.12;
+}
+
+.chart-chart-bar-scroll {
+  display: flex;
+  flex-direction: column;
+  overflow-x: auto;
+  overflow-y: hidden;
   width: 100%;
+}
+
+.chart-bar-pane {
+  align-items: flex-start;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  max-width: none;
+}
+
+.eval-chart.eval-chart-grouped {
+  display: block;
+  height: auto;
+  max-width: none;
+  min-height: unset;
+  vertical-align: top;
+  width: auto;
+}
+
+.chart-line-scroll {
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  width: 100%;
+}
+
+.chart-line-pane {
+  box-sizing: border-box;
+}
+
+.eval-chart.eval-chart-line {
+  display: block;
+  max-width: none;
+  min-height: unset;
+  vertical-align: top;
+  width: auto;
+}
+
+.chart-x-axis-slotted {
+  --chart-slots: 1;
+  column-gap: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--chart-slots), minmax(0, 1fr));
+  justify-items: stretch;
+  margin-top: 10px;
+  row-gap: 6px;
+  text-align: center;
+  width: 100%;
+}
+
+.chart-x-axis-slotted span {
+  color: var(--muted);
+  display: block;
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 1.25;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 0 2px;
+  text-align: center;
+}
+
+.chart-x-axis.chart-x-axis-dense span {
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.chart-x-axis-compactBins.chart-x-axis-slotted span[title] {
+  cursor: help;
+}
+
+.chart-x-axis-compactBins span {
+  font-size: 0.63rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
+}
+
+.chart-x-axis-compactBins.chart-x-axis-dense span {
+  font-size: 0.54rem;
+}
+
+@media (width <= 720px) {
+  .chart-x-axis.chart-x-axis-dense span {
+    font-size: 0.46rem;
+  }
+}
+
+.simple-int-bar {
+  margin: 4px 0 14px;
+  max-width: 420px;
+}
+
+.simple-int-bar-value-row {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.simple-int-bar-count {
+  color: var(--ink);
+  font-size: 1.85rem;
+  font-weight: 900;
+}
+
+.simple-int-bar-caption {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.simple-int-bar-axis {
+  color: var(--muted);
+  display: flex;
+  font-size: 0.7rem;
+  font-weight: 800;
+  justify-content: space-between;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+
+.simple-int-bar-track {
+  background: rgb(135 175 199 / 12%);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  height: 12px;
+  overflow: hidden;
+}
+
+.simple-int-bar-fill {
+  background: linear-gradient(90deg, #5a8aaa, #87afc7);
+  border-radius: 999px;
+  height: 100%;
+  min-width: 6px;
+  transition: width 0.2s ease;
+}
+
+.quality-events-summary-slot {
+  margin-top: -4px;
+}
+
+.rag-doc-scores-stack {
+  display: grid;
+  gap: 22px;
+}
+
+.rag-doc-call-block {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+}
+
+.rag-doc-call-header {
+  border-bottom: 1px dashed rgb(17 24 39 / 12%);
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+}
+
+.rag-doc-call-header strong {
+  display: inline-block;
+  margin-right: 8px;
+}
+
+.rag-doc-call-time {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.rag-doc-query {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-top: 6px;
+}
+
+.rag-doc-row-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rag-doc-row-meta {
+  align-items: center;
+  column-gap: 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  margin-bottom: 4px;
+}
+
+.rag-doc-rank {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 900;
+  width: 2rem;
+}
+
+.rag-doc-label {
+  font-size: 0.74rem;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rag-doc-score-chip {
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 900;
+}
+
+.rag-doc-score-bar-track {
+  background: rgb(17 24 39 / 6%);
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.rag-doc-score-bar-fill {
+  background: linear-gradient(90deg, #87afc7, #5a8aaa);
+  border-radius: 999px;
+  height: 100%;
+  transition: width 0.22s ease;
 }
 
 .eval-chart line {
@@ -1184,7 +1583,7 @@ audio {
 .eval-chart text.chart-y-tick {
   dominant-baseline: middle;
   fill: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 800;
   text-anchor: end;
 }
@@ -1205,7 +1604,7 @@ audio {
 .chart-point:hover,
 .chart-point:focus {
   outline: none;
-  r: 9px;
+  r: 5px;
 }
 
 .chart-series.hidden-series {
@@ -1253,6 +1652,10 @@ audio {
   text-align: center;
 }
 
+.chart-x-axis-strip {
+  box-sizing: border-box;
+}
+
 .chart-x-axis span {
   flex: 1 1 0;
   min-width: 0;
@@ -1260,6 +1663,7 @@ audio {
 }
 
 .chart-axis-labels {
+  align-items: flex-start;
   border-top: 1px solid var(--border);
   color: var(--ink);
   display: flex;
@@ -1270,6 +1674,35 @@ audio {
   justify-content: space-between;
   margin-top: 8px;
   padding-top: 10px;
+}
+
+.chart-axis-labels > span {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.chart-axis-labels-stack {
+  display: grid;
+  gap: 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  grid-template-columns: 1fr;
+}
+
+.chart-axis-labels-stack > span {
+  flex: unset;
+}
+
+.chart-axis-y-legend::before {
+  color: var(--muted);
+  content: "Y · ";
+  font-weight: 800;
+}
+
+.chart-axis-x-legend::before {
+  color: var(--muted);
+  content: "X · ";
+  font-weight: 800;
 }
 
 .bar-chart-shell {

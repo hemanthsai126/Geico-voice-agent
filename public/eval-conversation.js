@@ -14,6 +14,7 @@ import {
   metricCard,
   metricHelp,
   displayVoiceModel,
+  simpleIntegerBar,
 } from "./evalMetrics.js";
 
 const titleEl = document.querySelector("#conversationTitle");
@@ -24,6 +25,94 @@ const detailsEl = document.querySelector("#conversationDetails");
 const reviewEl = document.querySelector("#conversationReview");
 
 await loadConversationEval();
+
+/**
+ * Rows that drove `evals.responseLatencies` ordering (one sample per finalized user→agent reply).
+ */
+function transcriptEntryIsUserTurn(entry) {
+  const sr = String(entry?.sourceRole ?? "").toLowerCase();
+  if (sr === "user" || sr === "customer") return true;
+  if (sr === "agent" || sr === "assistant") return false;
+  const speaker = String(entry?.speaker ?? entry?.role ?? "").toLowerCase();
+  if (speaker.includes("lizzy") || speaker === "assistant" || speaker === "agent") return false;
+  return Boolean(String(entry?.text ?? "").trim());
+}
+
+/** @returns {number[]} transcript indices in order (customer turns only). */
+function userTurnTranscriptIndices(conversation) {
+  const rows = conversation?.transcripts ?? [];
+  return rows.map((entry, ix) => (transcriptEntryIsUserTurn(entry) ? ix : -1)).filter((ix) => ix >= 0);
+}
+
+/** transcript array index → response-latency chart index (same X order as latency line chart). */
+function latencyTurnAnchors(conversation) {
+  const latencies = conversation?.evals?.responseLatencies ?? [];
+  const userIx = userTurnTranscriptIndices(conversation);
+  /** @type {Map<number, number>} */
+  const byTranscript = new Map();
+
+  latencies.forEach((_lat, latencyIdx) => {
+    const transcriptIdx = userIx[latencyIdx];
+    if (transcriptIdx === undefined) return;
+    byTranscript.set(transcriptIdx, latencyIdx);
+  });
+
+  return byTranscript;
+}
+
+function highlightTranscriptForLatencyTurn(latencyTurnIndex, options = {}) {
+  const seekAudio = options.seekAudio !== false;
+  if (!reviewEl || !Number.isFinite(latencyTurnIndex)) return;
+
+  reviewEl.querySelectorAll(".transcript-group.latency-turn-highlight").forEach((el) =>
+    el.classList.remove("latency-turn-highlight"),
+  );
+
+  const target = reviewEl.querySelector(`.transcript-group[data-chart-turn="${latencyTurnIndex}"]`);
+  if (!target) return;
+
+  target.classList.add("latency-turn-highlight");
+
+  const scrollRoot = reviewEl.querySelector(".eval-inline-transcript");
+  if (scrollRoot && typeof scrollRoot.scrollTo === "function") {
+    const rootRect = scrollRoot.getBoundingClientRect();
+    const box = target.getBoundingClientRect();
+    const deltaTop = box.top - rootRect.top + scrollRoot.scrollTop;
+    const padding = Math.min(112, Math.max(40, scrollRoot.clientHeight * 0.28));
+    scrollRoot.scrollTo({ top: Math.max(0, deltaTop - padding), behavior: "smooth" });
+  } else {
+    target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  rowAudioSeekIfPresent(target, seekAudio);
+}
+
+function rowAudioSeekIfPresent(transcriptGroup, seekAudio) {
+  if (!seekAudio) return;
+  const row = transcriptGroup.querySelector(".transcript-row[data-timestamp-ms]");
+  const audioEl = document.querySelector("#evalInlineConversationAudio");
+  if (!row || !audioEl) return;
+  audioEl.currentTime = Number(row.dataset.timestampMs ?? 0) / 1000;
+}
+
+function onLatencyChartNavigateToTurn(event) {
+  const el = event.target;
+  if (!(el instanceof Element)) return;
+  const point = el.closest("circle.chart-point");
+  if (!point || !point.closest("[data-latency-turn-chart]")) return;
+
+  const rawIdx = point.getAttribute("data-response-latency-index");
+  if (rawIdx === null || rawIdx === "") return;
+
+  const latencyTurnIndex = Number(rawIdx);
+  if (!Number.isFinite(latencyTurnIndex)) return;
+
+  highlightTranscriptForLatencyTurn(latencyTurnIndex, { seekAudio: true });
+}
+
+if (chartsEl) {
+  chartsEl.addEventListener("click", onLatencyChartNavigateToTurn);
+}
 
 async function loadConversationEval() {
   const id = new URLSearchParams(window.location.search).get("id");
@@ -69,48 +158,49 @@ function renderSummary(item) {
 }
 
 function renderCharts(item) {
+  const knowledgePoints = item.ragCalls.map((call, index) => ({
+    ...item,
+    chartLabel: call.timestampMs !== undefined ? formatOffset(call.timestampMs) : `RAG${index + 1}`,
+    label: `RAG${index + 1}`,
+    avgToolDurationMs: call.durationMs,
+    ragLatencyMs: call.output?.ragLatencyMs,
+  }));
+
   const responsePoints = item.responseLatencies.map((latency, index) => ({
     ...item,
     chartLabel: formatOffset(latency.userTimestampMs),
+    /** Marks the saved customer-turn anchor on the timeline (see app.js recordUserTurn / userTimestampMs). */
+    label: `Customer turn ${index + 1}`,
+    axisDenseTitle: `${formatOffset(latency.userTimestampMs)} · Customer utterance ${index + 1} on the recording. Lizzy latency is measured from after this customer turn onward: stopwatch starts when the browser captures that turn.`,
     startedAt: item.startedAt,
     avgFirstAudioLatencyMs: latency.firstAudioLatencyMs,
     avgFinalTranscriptLatencyMs: latency.finalTranscriptLatencyMs,
   }));
-  const toolPoints = item.ragCalls.length
-    ? item.ragCalls.map((call, index) => ({
-        ...item,
-        chartLabel: call.timestampMs !== undefined ? formatOffset(call.timestampMs) : `RAG${index + 1}`,
-        avgToolDurationMs: call.durationMs,
-        ragLatencyMs: call.output?.ragLatencyMs,
-      }))
-    : [item];
+
   const toolUsagePoints = Object.entries(item.toolUsageByName).map(([name, count]) => ({
     ...item,
     chartLabel: name,
+    label: name.length > 42 ? `${name.slice(0, 40)}…` : name,
     count,
   }));
-  const ragScorePoints = item.ragCallScoreStats.map((stat) => ({
+
+  const ragAvgPoints = item.ragCallScoreStats.map((stat) => ({
     ...item,
     chartLabel: stat.timestampMs !== undefined ? formatOffset(stat.timestampMs) : stat.label,
-    query: stat.query,
-  }));
-  const maxRagResultCount = Math.max(0, ...item.ragCallScoreStats.map((stat) => stat.scores.length));
-  const ragDistributionSeries = Array.from({ length: maxRagResultCount }, (_, index) => ({
-    label: `Result ${index + 1} score`,
-    values: item.ragCallScoreStats.map((stat) => stat.scores[index]),
-    color: ["#5a8aaa", "#87afc7", "#1e2030", "#778899", "#b0cfe0"][index % 5],
+    label: stat.label,
+    averageScore: stat.averageScore,
   }));
 
   const responseLatencyChartInner = responsePoints.length
     ? lineChart(
         [
           {
-            label: "Response start",
+            label: "Lizzy · first audio",
             values: responsePoints.map((point) => point.avgFirstAudioLatencyMs),
             color: "#5a8aaa",
           },
           {
-            label: "Response complete",
+            label: "Lizzy · reply done",
             values: responsePoints.map((point) => point.avgFinalTranscriptLatencyMs),
             color: "#111827",
           },
@@ -118,50 +208,68 @@ function renderCharts(item) {
         responsePoints,
         formatMs,
         {
-          xLabel: "User turn timestamp in conversation audio",
-          yLabel: "Latency in milliseconds/seconds",
+          compressLatencyYAxis: true,
+          plotWidthMinPx: 320,
+          chartHeightPx: 238,
+          /** More space per slot so sideways scroll stays readable alongside compact axis labels */
+          slotMinPx: Math.min(72, Math.max(48, Math.round(820 / Math.max(responsePoints.length, 1)))),
+          /** Leaves room below the peak; hover dots still report exact latency */
+          yAxisNiceMul: 1.16,
+          plotTopPx: 15,
+          /** U1 … = customer utterance index; hover for why Lizzy latencies tie to that anchor */
+          denseItemLabelFormatter: (_item, i) => `U${i + 1}`,
+          chartAxisLegendStack: true,
+          xLabel: "Customer — where this utterance falls on the recording (Lizzy timings are measured afterward)",
+          yLabel: "Lizzy — delay after that customer turn (first audible audio vs finished reply)",
         },
       )
     : `<p class="status">No response latency samples captured for this conversation.</p>`;
 
-  const toolRuntimeChartInner = lineChart(
-    [
-      {
-        label: "Tool runtime",
-        values: toolPoints.map((point) => point.avgToolDurationMs),
-        color: "#87afc7",
-      },
-      {
-        label: "RAG runtime",
-        values: toolPoints.map((point) => point.ragLatencyMs),
-        color: "#1e2030",
-      },
-    ],
-    toolPoints,
-    formatMs,
-    {
-      xLabel: "RAG tool-call timestamp in conversation audio",
-      yLabel: "Runtime in milliseconds/seconds",
-    },
-  );
+  const knowledgeTimingChartInner =
+    knowledgePoints.length === 0
+      ? `<p class="status">No knowledge search tool calls in this conversation.</p>`
+      : groupedBarChart(
+          [
+            {
+              label: "Tool runtime",
+              values: knowledgePoints.map((point) => point.avgToolDurationMs),
+              color: "#87afc7",
+            },
+            {
+              label: "RAG retrieval",
+              values: knowledgePoints.map((point) => point.ragLatencyMs),
+              color: "#1e2030",
+            },
+          ],
+          knowledgePoints,
+          formatMs,
+          {
+            plotWidthMinPx: 320,
+            chartHeightPx: 188,
+            numericCategoryWidth: Math.min(86, Math.max(46, Math.round(400 / Math.max(knowledgePoints.length, 1)))),
+            xLabel: "Knowledge search calls in time order",
+            yLabel: "Runtime in milliseconds/seconds",
+          },
+        );
 
   chartsEl.innerHTML = [
     `
     <section class="card chart-card chart-card-latency-combo">
-      <div>
+      <div class="latency-combo-intro">
         <h2>Latency &amp; runtime</h2>
         <p>
-          Time from user turns to Lizzy responding, plus tool and RAG retrieval duration for each knowledge search tool call—all in one wide pane for easier scanning.
+          The line chart uses the <strong>customer</strong> side of the call for the horizontal axis: each point is saved when a customer turn is captured, anchored to that moment on the conversation recording. The vertical scale is <strong>Lizzy</strong>: how long until her first audible audio and until her reply transcript finishes. Hover chart dots for values; <strong>click a dot</strong> to highlight that customer turn in the transcript. Knowledge search bars are per RAG call (tool wall vs retrieval), not a smoothed line trend.
         </p>
       </div>
       <div class="latency-combo-charts">
-        <div class="latency-combo-block">
+        <div class="latency-combo-block" data-latency-turn-chart>
           <h3>Turn-by-turn response latency</h3>
+          <p class="latency-chart-hint">Wide runs scroll sideways. <strong>U1, U2 …</strong> = customer utterances in order (<strong>U</strong> = user/customer anchor on the timeline, not Lizzy). Hover a label for why—Lizzy latency is always measured <em>after</em> that anchor. Hover dots for exact Lizzy delays. Click a dot to jump to that turn in Conversation Review.</p>
           ${responseLatencyChartInner}
         </div>
         <div class="latency-combo-block">
-          <h3>Tool &amp; RAG runtime</h3>
-          ${toolRuntimeChartInner}
+          <h3>Knowledge search timing (per call)</h3>
+          ${knowledgeTimingChartInner}
         </div>
       </div>
     </section>
@@ -181,6 +289,9 @@ function renderCharts(item) {
             toolUsagePoints,
             String,
             {
+              plotWidthMinPx: 320,
+              chartHeightPx: 176,
+              numericCategoryWidth: Math.min(92, Math.max(52, Math.round(380 / Math.max(toolUsagePoints.length, 1)))),
               xLabel: "Tool name",
               yLabel: "Number of calls",
             },
@@ -188,56 +299,94 @@ function renderCharts(item) {
         : `<p class="status">No tool calls captured for this conversation.</p>`,
     ),
     chartCard(
-      "Corrections In This Conversation",
-      "Updates that replaced an already captured intake field with a different value.",
-      groupedBarChart(
-        [
-          {
-            label: "Field corrections",
-            values: [item.correctionCount],
-            color: "#5a8aaa",
-          },
-        ],
-        [item],
-        String,
-        {
-          xLabel: "This conversation",
-          yLabel: "Correction count",
-        },
-      ),
-    ),
-    chartCard(
-      "RAG Average Result Score Per Tool Call",
-      "For each RAG tool call, shows the average cosine score across returned results.",
+      "RAG average result score per call",
+      "For each semantic search, the mean cosine score across returned chunks (bars, not a faux time series).",
       item.ragCallScoreStats.length
-        ? lineChart(
+        ? groupedBarChart(
             [
               {
-                label: "Average result score",
+                label: "Average cosine",
                 values: item.ragCallScoreStats.map((stat) => stat.averageScore),
                 color: "#5a8aaa",
               },
             ],
-            ragScorePoints,
+            ragAvgPoints,
             formatScore,
             {
-              xLabel: "RAG tool-call timestamp in conversation audio",
+              plotWidthMinPx: 320,
+              chartHeightPx: 188,
+              numericCategoryWidth: Math.min(
+                92,
+                Math.max(46, Math.round(420 / Math.max(item.ragCallScoreStats.length, 1))),
+              ),
+              xLabel: "RAG calls in time order",
               yLabel: "Cosine similarity score",
             },
           )
         : `<p class="status">No RAG tool calls captured for this conversation.</p>`,
     ),
-    chartCard(
-      "RAG Match Score Distribution Per Query",
-      "Each line is one returned result rank. The spread between lines shows whether a query had a clear best match or flat scores.",
-      ragDistributionSeries.length
-        ? lineChart(ragDistributionSeries, ragScorePoints, formatScore, {
-            xLabel: "RAG query timestamp in conversation audio",
-            yLabel: "Cosine match score for each returned result",
-          })
-        : `<p class="status">No RAG result scores captured for this conversation.</p>`,
-    ),
+    chartCard("RAG chunks &amp; scores per call", ragDocScoresCaption(), renderRagDocumentScoresPerCallSection(item)),
   ].join("");
+}
+
+function ragDocScoresCaption() {
+  return "Each block is one search—ranked chunks with cosine score and an at-a-glance bar (replaces multi-line “distribution” charts that implied time on the X axis).";
+}
+
+function renderRagDocumentScoresPerCallSection(item) {
+  const stats = item.ragCallScoreStats ?? [];
+  if (!stats.length) {
+    return `<p class="status">No scored RAG payloads to show.</p>`;
+  }
+
+  return `
+    <div class="rag-doc-scores-stack">
+      ${stats
+        .map((stat, callIndex) => {
+          const headline = stat.timestampMs !== undefined ? formatOffset(stat.timestampMs) : stat.label;
+          const docs =
+            stat.documents?.length > 0
+              ? stat.documents
+              : (stat.scores ?? []).map((score, i) => ({
+                  rank: i + 1,
+                  score,
+                  docLabel: `Result ${i + 1}`,
+                }));
+          return `
+            <section class="rag-doc-call-block">
+              <header class="rag-doc-call-header">
+                <strong>${escapeHtml(stat.label ?? `RAG${callIndex + 1}`)}</strong>
+                <span class="rag-doc-call-time">${escapeHtml(headline)}</span>
+                ${stat.query ? `<p class="rag-doc-query">${escapeHtml(String(stat.query))}</p>` : ""}
+              </header>
+              ${
+                docs.length
+                  ? `<ul class="rag-doc-row-list">
+                      ${docs
+                        .map((doc) => {
+                          const pct = Math.round(Math.min(Math.max(Number(doc.score ?? 0), 0), 1) * 1000) / 10;
+                          return `
+                        <li class="rag-doc-row">
+                          <div class="rag-doc-row-meta">
+                            <span class="rag-doc-rank">#${doc.rank}</span>
+                            <span class="rag-doc-label" title="${escapeHtml(doc.docLabel)}">${escapeHtml(doc.docLabel)}</span>
+                            <span class="rag-doc-score-chip">${escapeHtml(formatScore(doc.score))}</span>
+                          </div>
+                          <div class="rag-doc-score-bar-track" aria-hidden="true">
+                            <div class="rag-doc-score-bar-fill" style="width:${pct}%"></div>
+                          </div>
+                        </li>`;
+                        })
+                        .join("")}
+                    </ul>`
+                  : `<p class="status">No cosine-scored chunks recorded for this query.</p>`
+              }
+            </section>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
 }
 
 function renderDetails(item, audio) {
@@ -249,6 +398,13 @@ function renderDetails(item, audio) {
         <p>
           The time shown is when the tool captured the change or error. <strong>Play from start</strong> jumps to the estimated start of that customer speech (using the live turn clock when available, otherwise a speech-length rewind and nearby field updates). Old conversations use a best-effort rewind.
         </p>
+      </div>
+      <div class="quality-events-summary-slot">
+        ${simpleIntegerBar(item.correctionCount, {
+          caption: "Corrections in this conversation",
+          ariaLabel: `${item.correctionCount} corrections recorded for this transcript section`,
+          minScale: 4,
+        })}
       </div>
       <div class="floating-audio-player eval-audio-player">
         <div>
@@ -337,6 +493,7 @@ function renderConversationReview(conversation, audio) {
   const toolCalls = conversation.toolCalls ?? [];
   const transcriptGroups = groupTranscriptWithToolCalls(transcripts, toolCalls);
   const fullTranscript = conversation.fullTranscript ?? buildFullTranscript(conversation, transcripts);
+  const latencyAnchors = latencyTurnAnchors(conversation);
 
   reviewEl.innerHTML = `
     <div class="dashboard-section-header">
@@ -355,7 +512,15 @@ function renderConversationReview(conversation, audio) {
 
     <h3>Transcript & Tool Calls</h3>
     <div class="stack eval-inline-transcript">
-      ${transcriptGroups.length ? transcriptGroups.map((group) => renderTranscriptGroup(group, conversation)).join("") : "<p>No transcript entries saved.</p>"}
+      ${
+        transcriptGroups.length
+          ? transcriptGroups
+              .map((group, transcriptIndex) =>
+                renderTranscriptGroup(group, conversation, latencyAnchors.get(transcriptIndex)),
+              )
+              .join("")
+          : "<p>No transcript entries saved.</p>"
+      }
     </div>
 
     <details class="full-transcript-details">
@@ -392,10 +557,14 @@ function groupTranscriptWithToolCalls(transcripts, toolCalls) {
   });
 }
 
-function renderTranscriptGroup(group, conversation) {
+function renderTranscriptGroup(group, conversation, latencyTurnIndex) {
   const { entry, calls } = group;
+  const turnAttr =
+    latencyTurnIndex !== undefined && Number.isFinite(latencyTurnIndex)
+      ? ` data-chart-turn="${latencyTurnIndex}"`
+      : "";
   return `
-    <div class="transcript-group">
+    <div class="transcript-group"${turnAttr}>
       <button class="transcript-row" data-audio-track="${escapeHtml(entry.audioTrack ?? "conversation")}" data-timestamp-ms="${escapeHtml(entry.timestampMs ?? 0)}">
         <span class="speaker-line">
           <strong>${escapeHtml(transcriptSpeaker(entry, conversation))}:</strong>
