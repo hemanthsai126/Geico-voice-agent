@@ -85,4 +85,6 @@ npm start
 
 ## Deployment
 
-Deploy the backend to Cloud Run or another host that supports long-lived WebSocket connections. Use Secret Manager or equivalent environment secret storage for OpenAI and Firebase-related configuration.
+**Vercel (HTTP + static):** This repo includes `vercel.json` and `api/index.ts` so REST routes and `public/` pages run as serverless Express. WebSockets (`/api/provider-realtime`, `/twilio/media-stream`) do **not** run on Vercel — use optional env vars `PROVIDER_REALTIME_WS_ORIGIN` and `TWILIO_MEDIA_STREAM_WS_URL` to point at a full Node deployment, or see [**docs/VERCEL.md**](docs/VERCEL.md).
+
+**Full stack (recommended for Twilio + Grok/Gemini sockets):** Deploy with `npm run build && npm run start` on Cloud Run, Railway, Render, Fly.io, or any host that keeps one Node process with WebSocket upgrades. Use Secret Manager or equivalent environment secret storage for OpenAI and Firebase-related configuration.

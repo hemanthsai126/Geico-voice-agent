@@ -18,6 +18,22 @@ function voiceCallModeFromRequest(req: Request, config: AppConfig): VoiceCallMod
   return config.CALL_MODE;
 }
 
+/** Browser combines this with `window.location` unless it is already an absolute `wss:` URL. */
+function providerRealtimeBrowserPath(config: AppConfig, provider: string, model: string): string {
+  const qs = `provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`;
+  const path = `/api/provider-realtime?${qs}`;
+  if (config.PROVIDER_REALTIME_WS_ORIGIN) {
+    const u = new URL(path, config.PROVIDER_REALTIME_WS_ORIGIN);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    return u.toString();
+  }
+  return path;
+}
+
+function grokGeminiBlockedOnVercelWithoutRelay(config: AppConfig): boolean {
+  return process.env.VERCEL === "1" && !config.PROVIDER_REALTIME_WS_ORIGIN;
+}
+
 export function handleBrowserRealtimeToken(config: AppConfig) {
   return async (req: Request, res: Response) => {
     try {
@@ -28,10 +44,18 @@ export function handleBrowserRealtimeToken(config: AppConfig) {
       const instructions = buildRealtimeIntakeInstructions(mode, { provider, model });
 
       if (provider !== "openai") {
+        if (grokGeminiBlockedOnVercelWithoutRelay(config)) {
+          res.status(503).json({
+            error:
+              "Grok and Gemini realtime need WebSockets. On Vercel, set PROVIDER_REALTIME_WS_ORIGIN to an HTTPS origin that runs this server with WS enabled (same codebase on Railway/Render/Fly), or use OpenAI in the browser.",
+          });
+          return;
+        }
+
         res.json({
           provider,
           model,
-          websocketPath: `/api/provider-realtime?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
+          websocketPath: providerRealtimeBrowserPath(config, provider, model),
           instructions,
           tools,
           audio: provider === "gemini" ? { inputRate: 16000, outputRate: 24000 } : { inputRate: 24000, outputRate: 24000 },
@@ -103,6 +127,18 @@ function openAiVoiceOptionLabel(model: string): string {
 
 export function handleVoiceModelOptions(config: AppConfig) {
   return (_req: Request, res: Response) => {
+    const relayBlocked = grokGeminiBlockedOnVercelWithoutRelay(config);
+    const grokNote = relayBlocked
+      ? "On Vercel: set PROVIDER_REALTIME_WS_ORIGIN to a WS-capable deployment of this app, or use OpenAI."
+      : config.GROK_API_KEY
+        ? "Runs through the xAI realtime voice adapter."
+        : "Add GROK_API_KEY to enable.";
+    const geminiNote = relayBlocked
+      ? "On Vercel: set PROVIDER_REALTIME_WS_ORIGIN to a WS-capable deployment of this app, or use OpenAI."
+      : config.GEMINI_API_KEY
+        ? "Runs through the Gemini Live adapter."
+        : "Add GEMINI_API_KEY to enable.";
+
     res.json({
       defaultProvider: config.VOICE_MODEL_PROVIDER,
       options: [
@@ -116,15 +152,15 @@ export function handleVoiceModelOptions(config: AppConfig) {
           provider: "grok",
           model: config.GROK_VOICE_MODEL,
           label: `Grok ${config.GROK_VOICE_MODEL}`,
-          available: Boolean(config.GROK_API_KEY),
-          note: config.GROK_API_KEY ? "Runs through the xAI realtime voice adapter." : "Add GROK_API_KEY to enable.",
+          available: Boolean(config.GROK_API_KEY) && !relayBlocked,
+          note: grokNote,
         },
         {
           provider: "gemini",
           model: config.GEMINI_VOICE_MODEL,
           label: `Gemini ${config.GEMINI_VOICE_MODEL}`,
-          available: Boolean(config.GEMINI_API_KEY),
-          note: config.GEMINI_API_KEY ? "Runs through the Gemini Live adapter." : "Add GEMINI_API_KEY to enable.",
+          available: Boolean(config.GEMINI_API_KEY) && !relayBlocked,
+          note: geminiNote,
         },
       ],
     });

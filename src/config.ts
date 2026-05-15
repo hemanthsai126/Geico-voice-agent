@@ -19,12 +19,25 @@ const rawEnvSchema = z.object({
   FIREBASE_CLIENT_EMAIL: z.string().email().optional(),
   FIREBASE_PRIVATE_KEY: z.string().min(1).optional(),
   FIRESTORE_COLLECTION: z.string().min(1).default("voiceIntakeLeads"),
+  /**
+   * HTTPS origin (no path) where `/api/provider-realtime` WebSocket is served — required for Grok/Gemini in the
+   * browser when this HTTP app runs on Vercel (no WS upgrades). Example: https://voice-ws.onrender.com
+   */
+  PROVIDER_REALTIME_WS_ORIGIN: z.string().url().optional(),
+  /** Full `wss://...` URL for Twilio Media Streams when this deployment does not expose `/twilio/media-stream`. */
+  TWILIO_MEDIA_STREAM_WS_URL: z.string().url().optional(),
 });
 
-const envSchema = rawEnvSchema.transform((data) => ({
-  ...data,
-  PUBLIC_BASE_URL: data.PUBLIC_BASE_URL ?? `http://127.0.0.1:${data.PORT}`,
-}));
+const envSchema = rawEnvSchema.transform((data) => {
+  const fromVercel = process.env.VERCEL_URL?.trim()
+    ? `https://${process.env.VERCEL_URL.trim()}`
+    : undefined;
+  const publicBase = data.PUBLIC_BASE_URL ?? fromVercel ?? `http://127.0.0.1:${data.PORT}`;
+  return {
+    ...data,
+    PUBLIC_BASE_URL: publicBase,
+  };
+});
 
 export type AppConfig = z.infer<typeof envSchema>;
 
