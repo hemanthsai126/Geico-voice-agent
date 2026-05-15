@@ -17,13 +17,10 @@ import {
   handleSaveConversationAudio,
 } from "./observability.js";
 import { handleTwilioVoice } from "./twilio.js";
-import { vercelRestorePathMiddleware } from "./vercelPath.js";
 
 /** Shared Express app (local Node server + Vercel serverless). */
 export function createApp(config: AppConfig) {
   const app = express();
-
-  app.use(vercelRestorePathMiddleware);
 
   app.use(express.urlencoded({ extended: false }));
   app.use(express.json());
