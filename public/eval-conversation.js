@@ -24,6 +24,9 @@ const chartsEl = document.querySelector("#conversationCharts");
 const detailsEl = document.querySelector("#conversationDetails");
 const reviewEl = document.querySelector("#conversationReview");
 
+/** Populated when a conversation loads (chart clicks map latency ↔ transcript + audio). */
+let conversationEvalLoaded = null;
+
 await loadConversationEval();
 
 /**
@@ -44,55 +47,150 @@ function userTurnTranscriptIndices(conversation) {
   return rows.map((entry, ix) => (transcriptEntryIsUserTurn(entry) ? ix : -1)).filter((ix) => ix >= 0);
 }
 
-/** transcript array index → response-latency chart index (same X order as latency line chart). */
+function transcriptEntryIsAgentTurn(entry) {
+  const sr = String(entry?.sourceRole ?? "").toLowerCase();
+  if (sr === "agent" || sr === "assistant") return true;
+  const speaker = String(entry?.speaker ?? entry?.role ?? "").toLowerCase();
+  return speaker.includes("lizzy") || speaker === "assistant" || speaker === "agent";
+}
+
+/** First Lizzy/agent transcript row strictly after this customer row (same reply cycle). */
+function indexOfAgentReplyAfter(transcripts, customerIdx) {
+  if (!Array.isArray(transcripts) || customerIdx < 0) return undefined;
+  for (let i = customerIdx + 1; i < transcripts.length; i++) {
+    const e = transcripts[i];
+    if (transcriptEntryIsUserTurn(e)) return undefined;
+    if (transcriptEntryIsAgentTurn(e)) return i;
+  }
+  return undefined;
+}
+
+/**
+ * Customer transcript row index → latency chart index.
+ * Prefer `userTimestampMs === transcripts[].timestampMs` because merged STT fragments can add extra user rows
+ * while latency keeps the anchor from the first `recordUserTurn` for that pending turn.
+ */
 function latencyTurnAnchors(conversation) {
   const latencies = conversation?.evals?.responseLatencies ?? [];
+  const transcripts = conversation?.transcripts ?? [];
   const userIx = userTurnTranscriptIndices(conversation);
   /** @type {Map<number, number>} */
   const byTranscript = new Map();
 
-  latencies.forEach((_lat, latencyIdx) => {
-    const transcriptIdx = userIx[latencyIdx];
-    if (transcriptIdx === undefined) return;
-    byTranscript.set(transcriptIdx, latencyIdx);
+  latencies.forEach((lat, latencyIdx) => {
+    const anchorMs = Number(lat.userTimestampMs ?? NaN);
+    let transcriptIdx;
+
+    if (Number.isFinite(anchorMs)) {
+      const hit = transcripts.findIndex(
+        (entry, ix) => transcriptEntryIsUserTurn(entry) && Number(entry.timestampMs ?? 0) === anchorMs,
+      );
+      if (hit >= 0) transcriptIdx = hit;
+    }
+    if (transcriptIdx === undefined) {
+      transcriptIdx = userIx[latencyIdx];
+    }
+
+    if (transcriptIdx !== undefined && transcriptIdx >= 0) {
+      byTranscript.set(transcriptIdx, latencyIdx);
+    }
   });
 
   return byTranscript;
 }
 
+/** latency chart index → transcript indices for customer + Lizzy reply */
+function latencyExchangePairs(conversation) {
+  const anchors = latencyTurnAnchors(conversation);
+  const transcripts = conversation?.transcripts ?? [];
+  /** @type {Map<number, { customerIx: number; agentIx?: number }>} */
+  const out = new Map();
+
+  for (const [customerIx, latencyIx] of anchors) {
+    const agentIx = indexOfAgentReplyAfter(transcripts, customerIx);
+    out.set(latencyIx, { customerIx, agentIx });
+  }
+
+  return out;
+}
+
+/** transcript row index → { latencyIx, side } for Conversation Review markup */
+function latencyExchangeRowTags(conversation) {
+  const pairs = latencyExchangePairs(conversation);
+  /** @type {Map<number, { latencyIx: number; side: "customer" | "lizzy" }>} */
+  const byRow = new Map();
+
+  for (const [latencyIx, pair] of pairs) {
+    byRow.set(pair.customerIx, { latencyIx, side: "customer" });
+    if (pair.agentIx !== undefined) {
+      byRow.set(pair.agentIx, { latencyIx, side: "lizzy" });
+    }
+  }
+
+  return byRow;
+}
+
+function latencySeekMs(conversation, latencyIdx, seriesSlug) {
+  const latencies = conversation?.evals?.responseLatencies ?? [];
+  const lat = latencies[latencyIdx];
+  if (!lat) return 0;
+
+  const base = Math.max(0, Number(lat.userTimestampMs ?? 0));
+  const fa = Math.max(0, Number(lat.firstAudioLatencyMs ?? 0));
+  const ftRaw = Number(lat.finalTranscriptLatencyMs ?? NaN);
+  const ft = Number.isFinite(ftRaw) ? Math.max(0, ftRaw) : fa;
+
+  if (seriesSlug === "lizzy-reply-done") return base + ft;
+  if (seriesSlug === "lizzy-first-audio") return base + fa;
+  return base;
+}
+
 function highlightTranscriptForLatencyTurn(latencyTurnIndex, options = {}) {
   const seekAudio = options.seekAudio !== false;
+  const seriesSlug = options.seriesSlug ?? "";
+  const conversation = options.conversation ?? conversationEvalLoaded;
+
   if (!reviewEl || !Number.isFinite(latencyTurnIndex)) return;
 
-  reviewEl.querySelectorAll(".transcript-group.latency-turn-highlight").forEach((el) =>
-    el.classList.remove("latency-turn-highlight"),
-  );
+  reviewEl.querySelectorAll("[data-latency-exchange]").forEach((el) => {
+    el.classList.remove("latency-exchange-highlight-customer", "latency-exchange-highlight-lizzy");
+  });
 
-  const target = reviewEl.querySelector(`.transcript-group[data-chart-turn="${latencyTurnIndex}"]`);
-  if (!target) return;
+  const targets = reviewEl.querySelectorAll(`[data-latency-exchange="${latencyTurnIndex}"]`);
+  if (!targets.length) return;
 
-  target.classList.add("latency-turn-highlight");
+  targets.forEach((el) => {
+    const side = el.dataset.latencySide;
+    el.classList.add(
+      side === "lizzy" ? "latency-exchange-highlight-lizzy" : "latency-exchange-highlight-customer",
+    );
+  });
+
+  const scrollTarget =
+    reviewEl.querySelector(`[data-latency-exchange="${latencyTurnIndex}"][data-latency-side="customer"]`) ??
+    targets[0];
 
   const scrollRoot = reviewEl.querySelector(".eval-inline-transcript");
   if (scrollRoot && typeof scrollRoot.scrollTo === "function") {
     const rootRect = scrollRoot.getBoundingClientRect();
-    const box = target.getBoundingClientRect();
+    const box = scrollTarget.getBoundingClientRect();
     const deltaTop = box.top - rootRect.top + scrollRoot.scrollTop;
     const padding = Math.min(112, Math.max(40, scrollRoot.clientHeight * 0.28));
     scrollRoot.scrollTo({ top: Math.max(0, deltaTop - padding), behavior: "smooth" });
   } else {
-    target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    scrollTarget.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
-  rowAudioSeekIfPresent(target, seekAudio);
-}
+  if (!seekAudio || !conversation) return;
 
-function rowAudioSeekIfPresent(transcriptGroup, seekAudio) {
-  if (!seekAudio) return;
-  const row = transcriptGroup.querySelector(".transcript-row[data-timestamp-ms]");
+  const ms = latencySeekMs(conversation, latencyTurnIndex, seriesSlug);
   const audioEl = document.querySelector("#evalInlineConversationAudio");
-  if (!row || !audioEl) return;
-  audioEl.currentTime = Number(row.dataset.timestampMs ?? 0) / 1000;
+  if (!audioEl || !Number.isFinite(ms)) return;
+
+  audioEl.currentTime = ms / 1000;
+  if (typeof audioEl.play === "function") {
+    audioEl.play().catch(() => {});
+  }
 }
 
 function onLatencyChartNavigateToTurn(event) {
@@ -107,7 +205,13 @@ function onLatencyChartNavigateToTurn(event) {
   const latencyTurnIndex = Number(rawIdx);
   if (!Number.isFinite(latencyTurnIndex)) return;
 
-  highlightTranscriptForLatencyTurn(latencyTurnIndex, { seekAudio: true });
+  const seriesSlug = point.getAttribute("data-series") ?? "";
+
+  highlightTranscriptForLatencyTurn(latencyTurnIndex, {
+    seekAudio: true,
+    seriesSlug,
+    conversation: conversationEvalLoaded,
+  });
 }
 
 if (chartsEl) {
@@ -128,6 +232,7 @@ async function loadConversationEval() {
     return;
   }
 
+  conversationEvalLoaded = data.conversation;
   const item = buildConversationEval(data.conversation);
   titleEl.textContent = item.customerName;
   descriptionEl.textContent = `${item.mode} conversation started ${formatDate(item.startedAt)} using ${displayVoiceModel(item.voiceModel)}.`;
@@ -258,13 +363,13 @@ function renderCharts(item) {
       <div class="latency-combo-intro">
         <h2>Latency &amp; runtime</h2>
         <p>
-          The line chart uses the <strong>customer</strong> side of the call for the horizontal axis: each point is saved when a customer turn is captured, anchored to that moment on the conversation recording. The vertical scale is <strong>Lizzy</strong>: how long until her first audible audio and until her reply transcript finishes. Hover chart dots for values; <strong>click a dot</strong> to highlight that customer turn in the transcript. Knowledge search bars are per RAG call (tool wall vs retrieval), not a smoothed line trend.
+          The line chart uses the <strong>customer</strong> side for the horizontal axis (saved utterance anchors on the recording). The vertical scale is <strong>Lizzy</strong> (delays after each anchor). Clicking a dot highlights <strong>both</strong> that customer turn and Lizzy&apos;s paired reply in the transcript, and seeks audio toward the matching moment (customer anchor vs measured Lizzy timings depending on which line you clicked). Knowledge search bars are per RAG call (tool wall vs retrieval), not a smoothed line trend.
         </p>
       </div>
       <div class="latency-combo-charts">
         <div class="latency-combo-block" data-latency-turn-chart>
           <h3>Turn-by-turn response latency</h3>
-          <p class="latency-chart-hint">Wide runs scroll sideways. <strong>U1, U2 …</strong> = customer utterances in order (<strong>U</strong> = user/customer anchor on the timeline, not Lizzy). Hover a label for why—Lizzy latency is always measured <em>after</em> that anchor. Hover dots for exact Lizzy delays. Click a dot to jump to that turn in Conversation Review.</p>
+          <p class="latency-chart-hint">Wide runs scroll sideways. <strong>U1, U2 …</strong> = customer anchors on the timeline (not Lizzy). Hover axis labels for details; hover dots for exact Lizzy delays. Click a dot to highlight <strong>both</strong> the customer turn and Lizzy&apos;s reply in Conversation Review. Audio seeks to the anchor plus the latency for whichever series you clicked (blue = first audio, black = reply done).</p>
           ${responseLatencyChartInner}
         </div>
         <div class="latency-combo-block">
@@ -493,7 +598,7 @@ function renderConversationReview(conversation, audio) {
   const toolCalls = conversation.toolCalls ?? [];
   const transcriptGroups = groupTranscriptWithToolCalls(transcripts, toolCalls);
   const fullTranscript = conversation.fullTranscript ?? buildFullTranscript(conversation, transcripts);
-  const latencyAnchors = latencyTurnAnchors(conversation);
+  const exchangeRowTags = latencyExchangeRowTags(conversation);
 
   reviewEl.innerHTML = `
     <div class="dashboard-section-header">
@@ -516,7 +621,7 @@ function renderConversationReview(conversation, audio) {
         transcriptGroups.length
           ? transcriptGroups
               .map((group, transcriptIndex) =>
-                renderTranscriptGroup(group, conversation, latencyAnchors.get(transcriptIndex)),
+                renderTranscriptGroup(group, conversation, transcriptIndex, exchangeRowTags.get(transcriptIndex)),
               )
               .join("")
           : "<p>No transcript entries saved.</p>"
@@ -557,11 +662,11 @@ function groupTranscriptWithToolCalls(transcripts, toolCalls) {
   });
 }
 
-function renderTranscriptGroup(group, conversation, latencyTurnIndex) {
+function renderTranscriptGroup(group, conversation, transcriptIndex, exchangeTag) {
   const { entry, calls } = group;
   const turnAttr =
-    latencyTurnIndex !== undefined && Number.isFinite(latencyTurnIndex)
-      ? ` data-chart-turn="${latencyTurnIndex}"`
+    exchangeTag != null && Number.isFinite(exchangeTag.latencyIx)
+      ? ` data-latency-exchange="${exchangeTag.latencyIx}" data-latency-side="${exchangeTag.side}"`
       : "";
   return `
     <div class="transcript-group"${turnAttr}>
