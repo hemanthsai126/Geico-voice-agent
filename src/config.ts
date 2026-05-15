@@ -26,6 +26,11 @@ const rawEnvSchema = z.object({
   PROVIDER_REALTIME_WS_ORIGIN: z.string().url().optional(),
   /** Full `wss://...` URL for Twilio Media Streams when this deployment does not expose `/twilio/media-stream`. */
   TWILIO_MEDIA_STREAM_WS_URL: z.string().url().optional(),
+  /**
+   * Firebase Storage bucket name (e.g. my-project.appspot.com or my-project.firebasestorage.app).
+   * Defaults to `<FIREBASE_PROJECT_ID>.appspot.com` when unset.
+   */
+  FIREBASE_STORAGE_BUCKET: z.string().min(1).optional(),
 });
 
 const envSchema = rawEnvSchema.transform((data) => {
@@ -36,6 +41,7 @@ const envSchema = rawEnvSchema.transform((data) => {
   return {
     ...data,
     PUBLIC_BASE_URL: publicBase,
+    FIREBASE_STORAGE_BUCKET: data.FIREBASE_STORAGE_BUCKET ?? `${data.FIREBASE_PROJECT_ID}.appspot.com`,
   };
 });
 

@@ -36,11 +36,11 @@ export function createApp(config: AppConfig) {
   app.post("/api/browser-intake", handleBrowserSaveIntake(config));
   app.post("/api/vin/decode", handleVinDecode());
   app.post("/api/geico/search", handleKnowledgeSearch(config));
-  app.post("/api/conversations", handleSaveConversation());
-  app.post("/api/conversations/:id/audio/:track", express.raw(conversationAudioBodyParser()), handleSaveConversationAudio());
-  app.get("/api/conversations", handleListConversations());
-  app.get("/api/conversations/:id", handleGetConversation());
-  app.get("/api/conversations/:id/audio/:track", handleGetConversationAudio());
+  app.post("/api/conversations", handleSaveConversation(config));
+  app.post("/api/conversations/:id/audio/:track", express.raw(conversationAudioBodyParser()), handleSaveConversationAudio(config));
+  app.get("/api/conversations", handleListConversations(config));
+  app.get("/api/conversations/:id", handleGetConversation(config));
+  app.get("/api/conversations/:id/audio/:track", handleGetConversationAudio(config));
   app.get(["/inbound", "/outbound"], (_req, res) => {
     res.sendFile(join(process.cwd(), "public", "call.html"));
   });

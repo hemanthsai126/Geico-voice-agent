@@ -20,6 +20,7 @@ export function initializeFirebase(config: AppConfig) {
             })
           : applicationDefault(),
       projectId: config.FIREBASE_PROJECT_ID,
+      storageBucket: config.FIREBASE_STORAGE_BUCKET,
     });
   }
 
