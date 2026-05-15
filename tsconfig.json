@@ -11,7 +11,9 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": ".",
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"]
 }
