@@ -11,7 +11,7 @@ dist/
 .DS_Store
 coverage/
 Observability/
-Geico Data/semantic-index.json
+# Geico Data/semantic-index.json is committed so Vercel can use it without regenerating
 *.pem
 *-firebase-adminsdk-*.json
 *credentials*.json

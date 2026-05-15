@@ -165,8 +165,12 @@ async function loadSemanticIndex(apiKey: string, embeddingModel: string): Promis
     })),
   };
 
-  await mkdir(join(process.cwd(), "Geico Data"), { recursive: true });
-  await writeFile(semanticIndexPath, JSON.stringify(cachedSemanticIndex, null, 2), "utf-8");
+  try {
+    await mkdir(join(process.cwd(), "Geico Data"), { recursive: true });
+    await writeFile(semanticIndexPath, JSON.stringify(cachedSemanticIndex, null, 2), "utf-8");
+  } catch {
+    // Read-only filesystem (e.g. Vercel) — index stays in memory only.
+  }
 
   return cachedSemanticIndex;
 }
